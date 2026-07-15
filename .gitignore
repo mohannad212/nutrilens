@@ -1,0 +1,43 @@
+# ---- Python (backend) ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ---- Node (mobile) ----
+node_modules/
+.expo/
+dist/
+web-build/
+npm-debug.log*
+
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Model weights & training artifacts ----
+backend/models/*.pth
+backend/models/*.json
+training/data/
+training/ckpt/
+training/checkpoints/
+training/artifacts/
+training/batch_preview.png
+
+# ---- OS / editor ----
+.DS_Store
+.vscode/
+.idea/
+
+# ---- Claude Code (local, machine-specific) ----
+.claude/settings.local.json
+
+# ---- Alembic ----
+backend/alembic/versions/__pycache__/

@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "NutriLens",
+    "slug": "nutrilens",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "nutrilens",
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.nutrilens.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "NutriLens needs camera access to photograph your meals."
+      }
+    },
+    "android": {
+      "package": "com.nutrilens.app",
+      "permissions": ["CAMERA"]
+    }
+  }
+}
