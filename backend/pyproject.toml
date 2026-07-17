@@ -9,10 +9,12 @@ dependencies = [
   "sqlalchemy>=2.0",
   "alembic>=1.13",
   "pydantic>=2.0",
+  "email-validator>=2.0",              # required by Pydantic EmailStr (auth schemas)
   "pydantic-settings>=2.0",
   "psycopg[binary]>=3.1",
   "python-jose[cryptography]",
   "passlib[bcrypt]",
+  "bcrypt==4.0.1",                     # passlib 1.7.4 breaks on bcrypt>=4.1 (removed __about__)
   "httpx",
   "python-multipart",
   "torch>=2.2",
@@ -48,6 +50,17 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
+# UP042: keep the `(str, enum.Enum)` style the schema design (02 §3) specifies.
+ignore = ["UP042"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom uses these as argument defaults (B008).
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+  "fastapi.Path",
+  "fastapi.Body",
+]
 
 [tool.mypy]
 python_version = "3.11"
