@@ -25,6 +25,8 @@ npm-debug.log*
 # ---- Model weights & training artifacts ----
 backend/models/*.pth
 backend/models/*.json
+# ...but the static Food-101 class list is committed reference data (seed input).
+!backend/models/labels_food101.json
 training/data/
 training/ckpt/
 training/checkpoints/
