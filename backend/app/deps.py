@@ -91,13 +91,14 @@ COMMON STUDENT MISTAKES
 
 from collections.abc import Iterator
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.core.errors import AccountLockedError, UnauthorizedError
+from app.core.errors import AccountLockedError, InferenceFailedError, UnauthorizedError
 from app.db.base import SessionLocal
 from app.db.models import User
+from app.ml.classifier import FoodClassifier
 from app.security import decode_access_token
 
 # Tells FastAPI's OpenAPI docs where to send the username/password to get a
@@ -137,3 +138,19 @@ def get_current_user(
         raise AccountLockedError()
 
     return user
+
+
+def get_classifier(request: Request) -> FoodClassifier:
+    """Hand the request the one `FoodClassifier` loaded at startup.
+
+    The model is loaded once by the app lifespan (`main.py`) and stashed on
+    `app.state.classifier`. If it failed to load (e.g. the weights file is
+    absent in an environment that only tracks it via a GitHub Release), that
+    attribute is `None` and any `/recognise` call fails cleanly with a 500
+    `INFERENCE_FAILED` envelope rather than an `AttributeError`. Tests override
+    this dependency with a stub, so they never need the real 69 MB weights.
+    """
+    classifier: FoodClassifier | None = getattr(request.app.state, "classifier", None)
+    if classifier is None:
+        raise InferenceFailedError("The recognition model is not available.")
+    return classifier

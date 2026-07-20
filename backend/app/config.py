@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     # ---- ML / model serving (declared now, consumed by M3) ----
     model_dir: str = "./models"
     classifier_weights: str = "food101_efficientnet_b4.pth"
+    classifier_labels: str = "labels_food101.json"
     confidence_threshold: float = 0.60
     device: str = "cpu"
 
@@ -101,6 +102,16 @@ class Settings(BaseSettings):
     max_upload_mb: int = 10
     min_image_width: int = 640
     min_image_height: int = 480
+
+    # ---- Image quality gate (FR03 extension; reject un-recognisable photos) ----
+    # A *rejection* gate, not an enhancement: it never alters pixels (which would
+    # cause train/serve skew), it only asks the user to retake a clearly bad
+    # photo. Thresholds are deliberately conservative so real food photos always
+    # pass; flip `quality_gate_enabled` off to disable during evaluation.
+    quality_gate_enabled: bool = True
+    brightness_min: float = 30.0  # mean luma 0-255; below this = too dark
+    brightness_max: float = 235.0  # above this = washed out / overexposed
+    blur_laplacian_min: float = 60.0  # variance of Laplacian; below this = too blurry
 
     # ---- Recommendations (used later by M7) ----
     min_meals_for_recommendation: int = 7

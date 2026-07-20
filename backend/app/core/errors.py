@@ -77,6 +77,7 @@ from typing import Any
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class AppError(Exception):
@@ -127,6 +128,48 @@ class UnauthorizedError(AppError):
     message = "Missing or invalid authentication credentials."
 
 
+# ---- Image upload validation (FR03, raised by app/ml/preprocess.py in M3) ----
+# These three map onto the distinct 4xx codes the /recognise contract promises
+# (03 §4, §9) so the mobile client can tell "too big" from "wrong format" from
+# "too small" and show the right message, instead of one generic "bad image".
+
+
+class ImageTooLargeError(AppError):
+    status_code = 413
+    code = "IMAGE_TOO_LARGE"
+    message = "Image exceeds the upload size limit."
+
+
+class ImageBadFormatError(AppError):
+    status_code = 400
+    code = "IMAGE_BAD_FORMAT"
+    message = "Image must be a valid JPEG or PNG."
+
+
+class ImageTooSmallError(AppError):
+    status_code = 400
+    code = "IMAGE_TOO_SMALL"
+    message = "Image resolution is below the minimum required."
+
+
+class ImagePoorLightingError(AppError):
+    status_code = 400
+    code = "IMAGE_POOR_LIGHTING"
+    message = "Image is too dark or too bright to recognise. Retake with even lighting."
+
+
+class ImageTooBlurryError(AppError):
+    status_code = 400
+    code = "IMAGE_TOO_BLURRY"
+    message = "Image is too blurry to recognise. Hold steady and retake."
+
+
+class InferenceFailedError(AppError):
+    status_code = 500
+    code = "INFERENCE_FAILED"
+    message = "The model failed to process this image."
+
+
 def _envelope(code: str, message: str, details: Any | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"code": code, "message": message}
     if details is not None:
@@ -142,6 +185,32 @@ async def app_error_handler(request: Request, exc: Exception) -> JSONResponse:
         status_code=exc.status_code,
         content=_envelope(exc.code, exc.message, exc.details),
     )
+
+
+# Map bare HTTP status codes (raised by FastAPI/Starlette internals, e.g.
+# OAuth2PasswordBearer's missing-token 401, or an unmatched-route 404) onto the
+# canonical `03 §9` code strings so *every* non-2xx uses the shared envelope.
+_STATUS_TO_CODE: dict[int, str] = {
+    401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    413: "IMAGE_TOO_LARGE",
+}
+
+
+async def http_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Reshape any bare `HTTPException` into the shared error envelope (`03 §9`).
+
+    FastAPI/Starlette raise plain `HTTPException`s in places we don't control
+    (a missing bearer token via `OAuth2PasswordBearer`, an unmatched route, a
+    wrong method). Their default body is `{"detail": ...}`, which would break the
+    "one error shape everywhere" contract the mobile client relies on, so we
+    normalise them here."""
+    assert isinstance(exc, StarletteHTTPException)
+    fallback = "INTERNAL_ERROR" if exc.status_code >= 500 else "HTTP_ERROR"
+    code = _STATUS_TO_CODE.get(exc.status_code, fallback)
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed."
+    return JSONResponse(status_code=exc.status_code, content=_envelope(code, message))
 
 
 async def validation_error_handler(request: Request, exc: Exception) -> JSONResponse:

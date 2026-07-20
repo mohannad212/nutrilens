@@ -145,7 +145,9 @@ Portion object (FR05): always a **range**; `point_g` is a convenience midpoint f
 `method` ∈ {`reference_object`, `container_prior`, `shape_only`} documents which stage produced the
 estimate (see `05`). Never returns a bare single value without a range.
 
-Errors: `400` bad type/resolution; `413` too large; `422` no image; `500` inference failure.
+Errors: `400` bad type/resolution, or a quality-gate rejection (`IMAGE_POOR_LIGHTING`
+too dark/bright, `IMAGE_TOO_BLURRY` out of focus — the app prompts a retake); `413` too large;
+`422` no image; `500` inference failure.
 
 ---
 
@@ -278,7 +280,8 @@ Every non-2xx returns:
 ```
 Canonical `code` values: `VALIDATION_ERROR`, `INVALID_CREDENTIALS`, `ACCOUNT_LOCKED`,
 `DUPLICATE_EMAIL`, `DUPLICATE_USERNAME`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`,
-`IMAGE_TOO_LARGE`, `IMAGE_BAD_FORMAT`, `IMAGE_TOO_SMALL`, `INFERENCE_FAILED`,
+`IMAGE_TOO_LARGE`, `IMAGE_BAD_FORMAT`, `IMAGE_TOO_SMALL`, `IMAGE_POOR_LIGHTING`,
+`IMAGE_TOO_BLURRY`, `INFERENCE_FAILED`,
 `USDA_RATE_LIMITED`, `USDA_UNAVAILABLE`, `NO_NUTRITION_MATCH`, `INTERNAL_ERROR`.
 
 ## 10. Enumerations (single source of truth)

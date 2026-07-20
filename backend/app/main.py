@@ -58,18 +58,51 @@ COMMON STUDENT MISTAKES
   route paths collide).
 """
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import auth as auth_router
+from app.api import recognise as recognise_router
+from app.config import settings
 from app.core.errors import (
     AppError,
     app_error_handler,
+    http_exception_handler,
     validation_error_handler,
 )
+from app.ml.classifier import load_classifier
+
+logger = logging.getLogger(__name__)
 
 # Every API route lives under this prefix (see 03-api-specification.md §Base URL).
 API_V1_PREFIX = "/api/v1"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load the recognition model once, at startup (04 §8).
+
+    The 69 MB weights are versioned via a GitHub Release, not git (04 §7), so an
+    environment may legitimately start without the file present (e.g. CI). Rather
+    than crash the whole API, we log a warning and leave `app.state.classifier =
+    None`; `/recognise` then returns a clean 500 INFERENCE_FAILED (via
+    `get_classifier`) while every other endpoint keeps working.
+    """
+    weights = Path(settings.model_dir) / settings.classifier_weights
+    labels = Path(settings.model_dir) / settings.classifier_labels
+    try:
+        app.state.classifier = load_classifier(str(weights), str(labels), settings.device)
+        logger.info("Recognition model loaded from %s (device=%s)", weights, settings.device)
+    except Exception:  # missing/corrupt weights — degrade, don't crash the API
+        app.state.classifier = None
+        logger.warning("Recognition model NOT loaded (%s); /recognise will 500", weights)
+    yield
 
 
 def create_app() -> FastAPI:
@@ -77,6 +110,7 @@ def create_app() -> FastAPI:
         title="NutriLens API",
         version="0.1.0",
         description="AI Food Recognition System — backend API",
+        lifespan=lifespan,
     )
 
     # /health is intentionally un-prefixed — it's the load-balancer probe (03 §8).
@@ -85,9 +119,11 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"])
+    app.include_router(recognise_router.router, prefix=API_V1_PREFIX, tags=["recognition"])
 
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
+    app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 
     return app
 
