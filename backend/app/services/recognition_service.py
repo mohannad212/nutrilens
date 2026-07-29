@@ -26,7 +26,10 @@ HOW IT WORKS INTERNALLY
      decoded in-memory RGB image — or raises the specific 4xx.
   2. `classifier.predict(image, top_k=3)` returns the top-3 `(class, confidence)`
      pairs, highest first.
-  3. The top-1 becomes the single `items[0]` (rank 1).
+  3. The top-1 becomes the single `items[0]` (rank 1). If a portion estimator is
+     wired and `settings.portion_enabled`, the M4 pipeline (`05`) estimates its
+     mass range and attaches a `portion` object; otherwise `portion` is null and
+     the classification half is unaffected.
   4. FR04 rule: if the top-1 confidence is below `settings.confidence_threshold`
      (default 0.60), set `low_confidence = True` and fill `alternatives` with the
      top-3 candidates for the user to choose from; otherwise `alternatives` is
@@ -70,10 +73,13 @@ from __future__ import annotations
 
 import uuid
 
+from PIL import Image
+
 from app.config import settings
 from app.ml.classifier import FoodClassifier
+from app.ml.portion import PortionEstimator, describe_scale_source
 from app.ml.preprocess import validate_and_load_image
-from app.schemas.recognition import Alternative, Prediction, RecognitionResponse
+from app.schemas.recognition import Alternative, Portion, Prediction, RecognitionResponse
 
 # How many candidates to offer when the model is unsure (FR04: "up to 3").
 _TOP_K = 3
@@ -84,16 +90,43 @@ def _display_name(food101_class: str) -> str:
     return food101_class.replace("_", " ").title()
 
 
+def _estimate_portion(
+    image: Image.Image,
+    food_class: str,
+    estimator: PortionEstimator | None,
+) -> Portion | None:
+    """Run the M4 portion pipeline for the top-1 item, or return None (FR05).
+
+    Portion is deliberately optional: it is skipped when disabled
+    (`settings.portion_enabled`) or when no estimator is wired, so the
+    classification half (FR03/FR04) never depends on it. The estimator itself
+    degrades gracefully (`05 §10`) — a `shape_only` range is a valid result, not
+    a failure.
+    """
+    if estimator is None or not settings.portion_enabled:
+        return None
+    est = estimator.estimate(image, food_class)
+    return Portion(
+        min_g=est.min_g,
+        max_g=est.max_g,
+        point_g=est.point_g,
+        method=est.method,
+        reference=est.reference,
+        scale_source=describe_scale_source(est.method, est.reference),
+    )
+
+
 def recognise(
     raw: bytes,
     content_type: str | None,
     classifier: FoodClassifier,
+    portion_estimator: PortionEstimator | None = None,
 ) -> RecognitionResponse:
-    """Validate an uploaded image, classify it, and apply the FR04 rule.
+    """Validate an uploaded image, classify it, estimate the portion, apply FR04.
 
     Raises the image-validation `AppError`s (413/400) from `preprocess` and
     `InferenceFailedError` (500) from the classifier; all become the shared
-    error envelope. The image is processed entirely in memory.
+    error envelope. The image (and any mask) is processed entirely in memory.
     """
     image = validate_and_load_image(raw, content_type)
     predictions = classifier.predict(image, top_k=_TOP_K)  # [(class, conf), ...]
@@ -105,6 +138,7 @@ def recognise(
             food101_class=top_class,
             display_name=_display_name(top_class),
             confidence=top_conf,
+            portion=_estimate_portion(image, top_class, portion_estimator),
         )
     ]
 

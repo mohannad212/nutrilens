@@ -77,6 +77,10 @@ from app.core.errors import (
     validation_error_handler,
 )
 from app.ml.classifier import load_classifier
+from app.ml.portion import PortionEstimator
+from app.ml.portion.container_model import load_container_model
+from app.ml.portion.reference_detector import load_coco_reference_detector
+from app.ml.portion.segmenter import load_food_segmenter
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,72 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # missing/corrupt weights — degrade, don't crash the API
         app.state.classifier = None
         logger.warning("Recognition model NOT loaded (%s); /recognise will 500", weights)
+
+    # M4 portion estimator (05). The trained aux models (container classifier,
+    # reference detector, segmenter) arrive from the offline ML track on their own
+    # schedule; until then the estimator runs with none of them wired and returns
+    # a valid `shape_only` range (05 §10). Constructing it never fails, but we
+    # still guard so a bad build degrades to "no portion" rather than crashing.
+    if settings.portion_enabled:
+        # Stage 1 container model is optional: load it if the trained weights are
+        # present, else leave it None so portion degrades to shape_only (05 §10).
+        container_model = None
+        cw = Path(settings.model_dir) / settings.container_weights
+        cl = Path(settings.model_dir) / settings.container_labels
+        try:
+            if cw.exists() and cl.exists():
+                container_model = load_container_model(str(cw), str(cl), settings.device)
+                logger.info("Container model loaded from %s", cw)
+            else:
+                logger.info("Container model not present (%s); portion uses shape_only", cw)
+        except Exception:
+            container_model = None
+            logger.warning("Container model failed to load (%s); portion uses shape_only", cw)
+
+        # Stage 2 reference detector is opt-in (downloads a COCO model). When off
+        # or unavailable, portion still works via container/shape-only (05 §10).
+        reference_detector = None
+        if settings.reference_detector_enabled:
+            try:
+                reference_detector = load_coco_reference_detector(
+                    settings.device, settings.reference_score_threshold
+                )
+                logger.info("COCO reference detector loaded (fork/spoon/knife)")
+            except Exception:
+                reference_detector = None
+                logger.warning("Reference detector failed to load; portion skips Stage 2")
+
+        # Food segmenter (05 §6): trained model if present, else classical fallback.
+        segmenter = None
+        sw = Path(settings.model_dir) / settings.segmenter_weights
+        try:
+            if sw.exists():
+                segmenter = load_food_segmenter(str(sw), settings.device)
+                logger.info("Food segmenter loaded from %s", sw)
+            else:
+                logger.info("Food segmenter not present (%s); using classical fallback", sw)
+        except Exception:
+            segmenter = None
+            logger.warning("Food segmenter failed to load (%s); classical fallback", sw)
+
+        try:
+            app.state.portion_estimator = PortionEstimator(
+                container_model=container_model,
+                reference_detector=reference_detector,
+                segmenter=segmenter,
+            )
+            logger.info(
+                "Portion estimator ready (container=%s, reference=%s, segmenter=%s)",
+                container_model is not None,
+                reference_detector is not None,
+                segmenter is not None,
+            )
+        except Exception:
+            app.state.portion_estimator = None
+            logger.warning("Portion estimator NOT built; /recognise omits portion")
+    else:
+        app.state.portion_estimator = None
+        logger.info("Portion estimation disabled (portion_enabled=false)")
     yield
 
 

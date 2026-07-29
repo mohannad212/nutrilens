@@ -99,6 +99,7 @@ from app.core.errors import AccountLockedError, InferenceFailedError, Unauthoriz
 from app.db.base import SessionLocal
 from app.db.models import User
 from app.ml.classifier import FoodClassifier
+from app.ml.portion import PortionEstimator
 from app.security import decode_access_token
 
 # Tells FastAPI's OpenAPI docs where to send the username/password to get a
@@ -154,3 +155,15 @@ def get_classifier(request: Request) -> FoodClassifier:
     if classifier is None:
         raise InferenceFailedError("The recognition model is not available.")
     return classifier
+
+
+def get_portion_estimator(request: Request) -> PortionEstimator | None:
+    """Hand the request the `PortionEstimator` built at startup, or None.
+
+    Unlike the classifier, a missing portion estimator is *not* a 500: portion
+    estimation is an optional enrichment of `/recognise` (FR05), so if it is
+    disabled or was not constructed we simply return None and the service omits
+    the `portion` object. The estimator itself never fails — with no trained aux
+    models wired it degrades to a `shape_only` range (`05 §10`).
+    """
+    return getattr(request.app.state, "portion_estimator", None)

@@ -17,14 +17,14 @@ mobile client's TypeScript types would silently drift from what the server
 actually sends. Declaring these schemas makes the shape a checked contract:
 FastAPI validates every response against it and publishes it in `/openapi.json`.
 
-SCOPE NOTE (M3 vs M4)
+SCOPE NOTE (M3 → M4)
 -----------------------
 The full `/recognise` contract in `03 §4` includes a `portion` object per item
-(min/max/point grams + method). Portion estimation is **M4** and is not built
-yet, so `portion` is deliberately omitted from `Prediction` for now — this
-milestone ships the *classification* half (FR03/FR04). When M4 lands, a
-`portion` field is added here (and to the mobile types) without changing any of
-the fields below.
+(min/max/point grams + method + reference). M3 shipped the *classification* half
+(FR03/FR04) with `portion` omitted; **M4** adds it. The `portion` field on
+`Prediction` is `Portion | None` — it is populated when the portion pipeline runs
+(`05`) and is `None` when portion estimation is disabled (`settings.portion_enabled`
+= false) or could not run, so the classification half never depends on it.
 
 HOW IT WORKS INTERNALLY
 --------------------------
@@ -67,7 +67,30 @@ COMMON STUDENT MISTAKES
   rounds it; the schema just types it.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+class Portion(BaseModel):
+    """Calibrated mass-range estimate for one item (FR05; `03 §4`, `05`).
+
+    Always a range — `point_g` is only the slider's default midpoint, never a
+    claim of precision. `method` records which scale stage produced it and
+    `reference` names the cue (a container/reference-object class) or is null.
+    """
+
+    min_g: float = Field(ge=0.0, description="Lower bound of the plausible mass")
+    max_g: float = Field(ge=0.0, description="Upper bound of the plausible mass")
+    point_g: float = Field(ge=0.0, description="Midpoint; the slider's default")
+    method: Literal["reference_object", "container_prior", "shape_only"]
+    reference: str | None = Field(
+        default=None, description="Scale cue used, e.g. 'dinner_plate' or 'fork'; null if none"
+    )
+    scale_source: str = Field(
+        description="Human-readable explanation of how the scale was derived, "
+        "e.g. 'measured from a fork in the photo'"
+    )
 
 
 class Prediction(BaseModel):
@@ -77,6 +100,10 @@ class Prediction(BaseModel):
     food101_class: str = Field(description="Raw Food-101 class, e.g. 'grilled_salmon'")
     display_name: str = Field(description="Human-friendly label, e.g. 'Grilled Salmon'")
     confidence: float = Field(ge=0.0, le=1.0)
+    portion: Portion | None = Field(
+        default=None,
+        description="Portion estimate (FR05); null if portion estimation is disabled/unavailable",
+    )
 
 
 class Alternative(BaseModel):

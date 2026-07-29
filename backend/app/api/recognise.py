@@ -62,8 +62,9 @@ COMMON STUDENT MISTAKES
 from fastapi import APIRouter, Depends, File, UploadFile
 
 from app.db.models import User
-from app.deps import get_classifier, get_current_user
+from app.deps import get_classifier, get_current_user, get_portion_estimator
 from app.ml.classifier import FoodClassifier
+from app.ml.portion import PortionEstimator
 from app.schemas.recognition import RecognitionResponse
 from app.services.recognition_service import recognise as recognise_service
 
@@ -75,6 +76,7 @@ async def recognise(
     image: UploadFile = File(...),
     _user: User = Depends(get_current_user),
     classifier: FoodClassifier = Depends(get_classifier),
+    portion_estimator: PortionEstimator | None = Depends(get_portion_estimator),
 ) -> RecognitionResponse:
     raw = await image.read()
-    return recognise_service(raw, image.content_type, classifier)
+    return recognise_service(raw, image.content_type, classifier, portion_estimator)

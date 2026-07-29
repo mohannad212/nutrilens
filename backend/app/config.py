@@ -113,6 +113,42 @@ class Settings(BaseSettings):
     brightness_max: float = 235.0  # above this = washed out / overexposed
     blur_laplacian_min: float = 60.0  # variance of Laplacian; below this = too blurry
 
+    # ---- Portion estimation (FR05, M4; see 05-portion-estimation.md) ----
+    # Master switch: off => /recognise omits the `portion` object (classification
+    # only, exactly like M3) so the endpoint still works if the pipeline is
+    # disabled for evaluation.
+    portion_enabled: bool = True
+    # Symmetric uncertainty bands (± fraction) for the stages whose band is a fixed
+    # constant (05 §4). A precise reference object gives a tight band; shape-only
+    # (no scale cue at all) is the widest. NOTE: the container-prior band is NOT a
+    # constant — it is derived from the container's own min/max size range (squared,
+    # since mass ∝ size²) in `container_priors.uncertainty_band`, so it widens
+    # honestly for vaguely-sized containers. `portion_eps_container` is retained
+    # only as a reference/fallback value and is not used by the estimator.
+    portion_eps_reference: float = 0.12  # method="reference_object"
+    portion_eps_container: float = 0.25  # (reference only; band is range-derived)
+    portion_eps_shape_only: float = 0.35  # method="shape_only"
+    # Shape-only fallback (05 §4): with no reference and no container, assume the
+    # image frame spans this many cm horizontally (typical arm's-length food
+    # photo) to derive a coarse cm-per-pixel scale from the image width alone.
+    portion_shape_only_frame_width_cm: float = 26.0
+    # Two references agreeing within this fraction are averaged (05 §4).
+    portion_reference_agree_tol: float = 0.15
+    # Stage-1 container classifier (M4 aux model, trained in training/portion).
+    # Loaded from `model_dir` at startup when present; absent -> portion falls back
+    # to shape_only (graceful, like the food model). Same TorchScript convention.
+    container_weights: str = "container_classifier.pth"
+    container_labels: str = "labels_container.json"
+    # Stage-2 reference-object detector (off-the-shelf COCO: fork/spoon/knife).
+    # OPT-IN: enabling it downloads a pretrained torchvision detector once at
+    # startup, so it is off by default. When on, reference objects give the
+    # tightest, plate-independent scale (05 §4).
+    reference_detector_enabled: bool = False
+    reference_score_threshold: float = 0.5
+    # Food segmentation model (05 §6). Loaded from `model_dir` when present; absent
+    # -> the estimator uses the classical GrabCut fallback, then a central box.
+    segmenter_weights: str = "food_segmenter.pth"
+
     # ---- Recommendations (used later by M7) ----
     min_meals_for_recommendation: int = 7
     recommendation_window_days: int = 7
