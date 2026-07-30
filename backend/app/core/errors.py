@@ -128,6 +128,18 @@ class UnauthorizedError(AppError):
     message = "Missing or invalid authentication credentials."
 
 
+class NotFoundError(AppError):
+    status_code = 404
+    code = "NOT_FOUND"
+    message = "The requested resource does not exist."
+
+
+class ForbiddenError(AppError):
+    status_code = 403
+    code = "FORBIDDEN"
+    message = "You do not have access to this resource."
+
+
 # ---- Image upload validation (FR03, raised by app/ml/preprocess.py in M3) ----
 # These three map onto the distinct 4xx codes the /recognise contract promises
 # (03 §4, §9) so the mobile client can tell "too big" from "wrong format" from

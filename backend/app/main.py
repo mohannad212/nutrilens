@@ -69,6 +69,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import auth as auth_router
 from app.api import recognise as recognise_router
+from app.api import recommendations as recommendations_router
 from app.config import settings
 from app.core.errors import (
     AppError,
@@ -190,6 +191,9 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"])
     app.include_router(recognise_router.router, prefix=API_V1_PREFIX, tags=["recognition"])
+    app.include_router(
+        recommendations_router.router, prefix=API_V1_PREFIX, tags=["recommendations"]
+    )
 
     app.add_exception_handler(AppError, app_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)

@@ -49,11 +49,25 @@ Request:
   "username": "mohannad",
   "email": "user@example.com",
   "password": "Str0ngPass!",
-  "health_goal": "weight_loss"
+  "health_goal": "weight_loss",
+
+  "height_cm": 178.5,
+  "weight_kg": 74.2,
+  "birth_year": 2001,
+  "sex": "male",
+  "activity_level": "moderate"
 }
 ```
 Validation: `username` 3–50 chars unique; `email` valid + unique; `password` ≥ 8 chars (must
 contain letter + digit); `health_goal` ∈ {weight_loss, maintenance, weight_gain}.
+
+The five body metrics are **all optional** (added in M7). When present they are range-checked —
+`height_cm` 100–250, `weight_kg` 25–300, `birth_year` implying an age of 13–120, `sex` ∈
+{female, male}, `activity_level` ∈ the enum in §10 — because these values are multiplied into a
+calorie figure shown to the user, so a unit mix-up (`height_cm: 1.78`) must be rejected at the
+edge rather than surfacing as confident nonsense in an insight. Omitting them costs only the
+calorie *verdict* in `/recommendations`; every macro insight is a ratio and works without them.
+They may also be filled in later via `PATCH /users/me/metrics` (§3).
 
 Response `201`:
 ```json
@@ -99,6 +113,15 @@ Current profile. **Auth.**
 Update health goal.
 Request: `{ "health_goal": "maintenance" }` → `200` returns updated profile.
 Side effect: next recommendation refresh uses the new target distribution (`06`).
+
+### PATCH `/users/me/metrics` — M7 support (built with the Profile screen in M6)
+Update any subset of the optional body metrics from §2. **Auth.**
+Request: `{ "weight_kg": 71.0, "activity_level": "active" }` → `200` returns updated profile.
+Omitted keys are left unchanged; an explicit `null` clears a field.
+Validation is identical to `/auth/register`.
+Side effect: once all five are present, the next refresh upgrades the calorie insight from a
+descriptive note to an above/below verdict (`06 §2`). The insight text names exactly which fields
+are still missing, so this endpoint is what the user is being pointed at.
 
 ### DELETE `/users/me` — FR14
 Irreversibly delete the account and all owned data (cascade per `02`). **Auth.**
@@ -240,10 +263,25 @@ Delete one meal (cascade removes its items). **Auth.** `403` if not owner. `200 
 
 ### GET `/recommendations`
 Return the user's current insights (≤ 5). **Auth.**
+All three responses below share **one** object shape (the same keys are always present;
+`unlocked` is the discriminator the client branches on). `meals_logged` counts **all** confirmed
+meals ever logged, not just those in the 7-day window — unlocking is a milestone, so a user who
+logs 10 meals then takes a week off must not find the feature re-locked.
+
 - If `confirmed meal count < 7`: `200` with `unlocked:false` and a progress hint — **not** an error.
 ```json
 { "unlocked": false, "meals_logged": 4, "meals_required": 7,
-  "message": "Log 3 more meals to unlock personalised insights.", "insights": [] }
+  "message": "Log 3 more meals to unlock personalised insights.", "insights": [],
+  "generated_at": null, "disclaimer": "..." }
+```
+- If unlocked but **no meals fall inside the 7-day window** (the cost of the rule above): `200`,
+  `unlocked:true`, no insights, and a notice. Nothing is persisted — there is no nutritional
+  finding to record.
+```json
+{ "unlocked": true, "insights": [], "generated_at": null,
+  "meals_logged": 12, "meals_required": 7,
+  "message": "You have not logged any meals in the last 7 days. Log a few and these insights will refresh with your latest eating pattern.",
+  "disclaimer": "..." }
 ```
 - If unlocked:
 ```json
@@ -254,12 +292,28 @@ Return the user's current insights (≤ 5). **Auth.**
   "disclaimer": "Nutritional information and dietary suggestions are for informational purposes only and do not constitute medical or clinical nutritional advice. Consult a qualified healthcare professional for specific dietary needs." }
 ```
 
+GET honours the `06 §3` idempotency cache: insights generated less than
+`RECOMMENDATION_CACHE_HOURS` (6) ago with no confirmed meal logged since are returned as stored,
+so repeatedly opening the Insights screen does not reshuffle the wording.
+
 ### POST `/recommendations/refresh`
-Force regeneration from the latest 7-day window. **Auth.** Runs the engine in `06`. `200` with the
-same shape as GET (unlocked case). No-op-safe if locked.
+Force regeneration from the latest 7-day window, bypassing the cache. **Auth.** Runs the engine in
+`06`. `200` with the same shape as GET (unlocked case). No-op-safe if locked.
+
+POST rather than GET because it has a side effect — it writes a new batch of `recommendation`
+rows. It is nonetheless idempotent from the client's point of view ("make my insights current")
+and returns the insight set itself, which is why it is `200` and not `201`.
 
 ### PATCH `/recommendations/{rec_id}/read`
-Mark an insight read. `200`.
+Mark an insight read. `200`. Idempotent — marking an already-read insight succeeds, so a client
+retrying after a dropped response does not see an error.
+
+Response `200`:
+```json
+{ "rec_id": 5, "was_read": true }
+```
+Errors: `404` no insight with that id; `403` the insight belongs to another user (§1); `422`
+non-integer `rec_id`.
 
 ---
 
@@ -288,6 +342,9 @@ Canonical `code` values: `VALIDATION_ERROR`, `INVALID_CREDENTIALS`, `ACCOUNT_LOC
 
 - `health_goal`: `weight_loss`, `maintenance`, `weight_gain`
 - `meal_type`: `breakfast`, `lunch`, `dinner`, `snack`
+- `sex`: `female`, `male` (nullable — there is no "unspecified" value; omit the field instead)
+- `activity_level`: `sedentary`, `light`, `moderate`, `active`, `very_active`
+- `nutrient_focus`: `protein`, `carbs`, `fat`, `calories`, `balance`
 - `cooking_method`: `grilled`, `fried`, `boiled`, `baked`, `roasted`, `steamed`, `raw`, `other`
 - `portion.method`: `reference_object`, `container_prior`, `shape_only`
 - `nutrition.source`: `usda`, `cache`
@@ -303,7 +360,9 @@ Canonical `code` values: `VALIDATION_ERROR`, `INVALID_CREDENTIALS`, `ACCOUNT_LOC
 | POST /meals | FR10 | M5 |
 | GET /meals, /meals/{id} | FR11 | M6 |
 | PATCH /users/me/goal | FR13 | M6 |
+| PATCH /users/me/metrics | FR12 (support) | M6 |
 | GET/POST /recommendations | FR12 | M7 |
+| PATCH /recommendations/{id}/read | FR12 | M7 |
 | DELETE /users/me | FR14 | M8 |
 
 ---

@@ -149,9 +149,15 @@ class Settings(BaseSettings):
     # -> the estimator uses the classical GrabCut fallback, then a central box.
     segmenter_weights: str = "food_segmenter.pth"
 
-    # ---- Recommendations (used later by M7) ----
+    # ---- Recommendations (FR12, M7; see 06-recommendation-engine.md) ----
     min_meals_for_recommendation: int = 7
     recommendation_window_days: int = 7
+    # Idempotency window (06 §3): a GET inside this many hours of the last
+    # generation, with no meal logged since, returns the stored rows instead of
+    # regenerating. Stops the insight text churning on every screen open, which
+    # would read as instability rather than as freshness. POST
+    # /recommendations/refresh bypasses it.
+    recommendation_cache_hours: int = 6
 
 
 # Single, importable instance — created once at process startup.

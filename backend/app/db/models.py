@@ -127,6 +127,30 @@ class MealType(str, enum.Enum):
     snack = "snack"
 
 
+class Sex(str, enum.Enum):
+    """
+    Biological sex, needed *only* as the sex-specific constant in the
+    Mifflin-St Jeor BMR equation (see `ml/reco_targets.py`).
+
+    The column is nullable, which is how a user declines to disclose it: leaving
+    it empty costs only the calorie insight (every macro insight is a ratio and
+    needs no body data at all), so nobody is forced to answer to use the app.
+    """
+
+    female = "female"
+    male = "male"
+
+
+class ActivityLevel(str, enum.Enum):
+    """Standard Mifflin-St Jeor activity multipliers (1.2 - 1.9)."""
+
+    sedentary = "sedentary"
+    light = "light"
+    moderate = "moderate"
+    active = "active"
+    very_active = "very_active"
+
+
 # ---------------------------------------------------------------------------
 # user  — FR01 (registration), FR02 (auth + lockout), FR13 (health goal)
 # ---------------------------------------------------------------------------
@@ -146,6 +170,21 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     account_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     failed_login_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
+
+    # --- Anthropometrics (M7 / FR12) -------------------------------------
+    # ALL NULLABLE, deliberately. They exist so the recommendation engine can
+    # estimate maintenance energy needs (Mifflin-St Jeor TDEE) and therefore say
+    # something honest about the user's calorie average instead of comparing it
+    # against a population guess. A user who supplies none of them still gets the
+    # full macro-distribution insights; only the calorie insight degrades to a
+    # neutral, non-judgmental observation (06 §2 `calorie_note`).
+    height_cm: Mapped[float | None] = mapped_column(Numeric(4, 1))
+    weight_kg: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    birth_year: Mapped[int | None] = mapped_column(SmallInteger)
+    sex: Mapped[Sex | None] = mapped_column(Enum(Sex, name="sex_enum"))
+    activity_level: Mapped[ActivityLevel | None] = mapped_column(
+        Enum(ActivityLevel, name="activity_level_enum")
+    )
 
     meals: Mapped[list["MealLog"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
