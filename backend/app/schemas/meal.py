@@ -124,6 +124,66 @@ class MealItemOut(BaseModel):
     portion_confirmed_g: float
 
 
+class MealSummary(BaseModel):
+    """One meal as `GET /meals` and `GET /meals/{id}` return it (`03 §6`).
+
+    `item_count` is published alongside `items` even though the client could take
+    the list's length. It is what the History row renders ("2 items") without
+    reading the nested array, and it keeps that row correct if a future page ever
+    returns summaries with the items omitted for size.
+    """
+
+    log_id: int
+    logged_at: datetime
+    meal_type: MealType
+    total_calories: float
+    item_count: int
+    items: list[MealItemOut]
+
+    @classmethod
+    def from_meal(cls, meal: MealLog) -> "MealSummary":
+        items = [
+            MealItemOut(
+                item_id=item.item_id,
+                food_name=item.food.food_name,
+                calories_est=float(item.calories_est or 0),
+                protein_est_g=float(item.protein_est_g or 0),
+                carbs_est_g=float(item.carbs_est_g or 0),
+                fat_est_g=float(item.fat_est_g or 0),
+                portion_confirmed_g=float(item.portion_confirmed_g or 0),
+            )
+            for item in meal.items
+        ]
+        return cls(
+            log_id=meal.log_id,
+            logged_at=meal.logged_at,
+            meal_type=meal.meal_type,
+            total_calories=float(meal.total_calories or 0),
+            item_count=len(items),
+            items=items,
+        )
+
+
+class MealListResponse(BaseModel):
+    """`GET /meals` (`03 §6`) — a page of history plus what it is a page *of*.
+
+    `total` counts every meal matching the filters, not the rows in `meals`. The
+    History screen needs that to know whether to keep paging; without it the only
+    signal is "a short page", which is indistinguishable from the last page.
+    """
+
+    total: int
+    limit: int
+    offset: int
+    meals: list[MealSummary]
+
+
+class MealDeleteResponse(BaseModel):
+    """`DELETE /meals/{log_id}` (`03 §6`)."""
+
+    deleted: bool = True
+
+
 class MealCreateResponse(BaseModel):
     """`POST /meals` response body (`03 §6`)."""
 

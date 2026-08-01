@@ -30,12 +30,29 @@ body, so there is no code path by which one account can write a meal into
 another's history. This is the same rule the recommendations router follows and
 the one `11` tests for per-user isolation depend on.
 
-WHY THE ONLY REMAINING M6/M7 ENDPOINTS ARE NOT HERE
-------------------------------------------------------
-`GET /meals`, `GET /meals/{id}` and `DELETE /meals/{id}` are `03 §6` too, but `09`
-assigns them to M6 (History). They are left out rather than built ahead because
-each needs ownership checks and pagination semantics that the History screen's
-design drives. `POST` is the one M5 needs to close the loop.
+WHY `from`/`to` ARE DECLARED WITH AN ALIAS
+--------------------------------------------
+`03 §6` names the date filters `?from=` and `?to=`. `from` is a Python keyword, so
+the parameter cannot be called that; `Query(alias="from")` keeps the wire name the
+contract specifies while the Python identifier is `date_from`. Renaming the query
+parameter to dodge the keyword would have been a silent breach of the contract —
+the app would send `from` and the server would ignore it, filtering nothing and
+returning a full history where the user asked for one day.
+
+WHY 403 AND 404 ARE BOTH POSSIBLE ON A SINGLE MEAL
+-----------------------------------------------------
+`03 §1`'s split: 404 when no meal with that id exists, 403 when one does but
+belongs to another user. The service raises both; the shared `AppError` handler
+renders them. See `meal_service.get_meal` for the disclosure trade-off that
+distinction carries.
+
+WHY `DELETE` RETURNS 200 WITH A BODY RATHER THAN 204
+-------------------------------------------------------
+204 No Content is the tidier REST answer for a delete. `03 §6` specifies
+`200 {"deleted": true}`, and the reason to follow it is the mobile client: a
+response with a parseable body goes through the same success path as every other
+call, whereas 204 is the one status where reading `response.data` yields nothing
+and needs a special case in the shared axios layer (`07 §5`).
 
 DISCUSSION / DEFENSE QUESTIONS
 --------------------------------
@@ -62,17 +79,30 @@ COMMON STUDENT MISTAKES
   so what the user sees is what they sent rather than what was stored.
 """
 
-from fastapi import APIRouter, Depends, status
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.models import User
 from app.deps import get_current_user, get_db, get_usda_client
 from app.integrations.usda_client import UsdaClient
-from app.schemas.meal import MealCreateRequest, MealCreateResponse
+from app.schemas.meal import (
+    MealCreateRequest,
+    MealCreateResponse,
+    MealDeleteResponse,
+    MealListResponse,
+    MealSummary,
+)
 from app.services import meal_service
 from app.services.meal_service import MealItemInput
 
 router = APIRouter()
+
+# `03 §6` defaults, with an upper bound: an unbounded `limit` lets one request ask
+# for a user's entire history and serialise every item of every meal.
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 100
 
 
 @router.post("/meals", response_model=MealCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -103,3 +133,63 @@ def create_meal(
 
     meal, total, unlocked = meal_service.log_meal(current_user, payload.meal_type, items, db, usda)
     return MealCreateResponse.from_meal(meal, total, unlocked)
+
+
+@router.get("/meals", response_model=MealListResponse)
+def list_meals(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    # `from` is a Python keyword, so the identifier differs from the wire name.
+    # The alias is what keeps the contract's `?from=` working (see the header).
+    date_from: datetime | None = Query(None, alias="from"),
+    date_to: datetime | None = Query(None, alias="to"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MealListResponse:
+    """
+    FR11 — the user's meal history, newest first, paginated (`03 §6`).
+
+    Confirmed meals only. The user id comes from the token, never the request, so
+    there is no way to page through another account's history.
+    """
+    meals, total = meal_service.list_meals(
+        current_user.user_id,
+        db,
+        limit=limit,
+        offset=offset,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return MealListResponse(
+        total=total,
+        limit=limit,
+        offset=offset,
+        meals=[MealSummary.from_meal(meal) for meal in meals],
+    )
+
+
+@router.get("/meals/{log_id}", response_model=MealSummary)
+def get_meal(
+    log_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MealSummary:
+    """
+    One meal in full (`03 §6`). 404 if no such meal, 403 if it is someone else's —
+    both raised by the service and rendered by the shared error handler.
+    """
+    return MealSummary.from_meal(meal_service.get_meal(current_user.user_id, log_id, db))
+
+
+@router.delete("/meals/{log_id}", response_model=MealDeleteResponse)
+def delete_meal(
+    log_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> MealDeleteResponse:
+    """
+    Delete one meal; its items cascade (`03 §6`). Ownership-checked, so a user can
+    only ever delete their own history.
+    """
+    meal_service.delete_meal(current_user.user_id, log_id, db)
+    return MealDeleteResponse()

@@ -127,6 +127,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.errors import ForbiddenError, NotFoundError
 from app.db.models import MealItem, MealLog, MealType, User
 from app.integrations.usda_client import UsdaClient
 from app.services import nutrition_service, recommendation_service
@@ -268,6 +269,90 @@ def create_meal(
 
     db.refresh(meal)
     return meal
+
+
+def list_meals(
+    user_id: int,
+    db: Session,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> tuple[list[MealLog], int]:
+    """FR11 — the user's meal history, newest first (`03 §6`).
+
+    Returns `(page, total)` where `total` is the count matching the *filters*, not
+    the length of the page — the client needs it to know whether more pages exist,
+    so counting the page would make pagination undisplayable.
+
+    Confirmed meals only (`02 §6`): an unconfirmed row is a draft and must not
+    appear in history. NutriLens never writes one today, but the filter is the
+    schema's stated contract and history is exactly where a stray draft would
+    surface.
+    """
+    filters = [MealLog.user_id == user_id, MealLog.user_confirmed.is_(True)]
+    if date_from is not None:
+        filters.append(MealLog.logged_at >= date_from)
+    if date_to is not None:
+        filters.append(MealLog.logged_at <= date_to)
+
+    total = db.execute(select(func.count()).select_from(MealLog).where(*filters)).scalar_one() or 0
+
+    rows = (
+        db.execute(
+            select(MealLog)
+            # `log_id` breaks ties: two meals logged in the same clock tick would
+            # otherwise come back in an unstable order, which makes pagination drop
+            # or repeat rows between pages.
+            .where(*filters)
+            .order_by(MealLog.logged_at.desc(), MealLog.log_id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), total
+
+
+def get_meal(user_id: int, log_id: int, db: Session) -> MealLog:
+    """One meal, ownership-checked (`03 §6`).
+
+    Raises `NotFoundError` when no such meal exists and `ForbiddenError` when it
+    exists but belongs to someone else — the split `03 §6` and `03 §1` specify.
+
+    Worth naming the trade-off, because it is a real one: answering 403 rather
+    than 404 for another user's meal confirms that `log_id` exists, so an
+    authenticated user can probe the id space to learn how many meals the system
+    holds. That is a small disclosure (ids are sequential, so the count is
+    inferable anyway) and the contract asks for the distinction, which is more
+    useful to a client deciding whether to retry or to refresh its list. A system
+    where that leak mattered would return 404 for both.
+    """
+    meal = db.get(MealLog, log_id)
+    if meal is None:
+        raise NotFoundError("No meal with that id.")
+    if meal.user_id != user_id:
+        raise ForbiddenError("This meal belongs to another user.")
+    return meal
+
+
+def delete_meal(user_id: int, log_id: int, db: Session) -> None:
+    """Delete one meal and its items (FR11, `03 §6`).
+
+    Ownership is enforced by reusing `get_meal`, so the two endpoints cannot
+    disagree about who may touch a row.
+
+    The `meal_item` children go with it: `02 §1` puts `ON DELETE CASCADE` on the
+    owned chain, and the ORM relationship carries `delete-orphan` to match. The
+    `food_item` rows they referenced are deliberately untouched — that is shared
+    reference data behind an `ON DELETE RESTRICT` foreign key, and another user's
+    history may point at the same row.
+    """
+    meal = get_meal(user_id, log_id, db)
+    db.delete(meal)
+    db.commit()
 
 
 def log_meal(

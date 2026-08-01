@@ -73,6 +73,7 @@ from app.api import meta as meta_router
 from app.api import nutrition as nutrition_router
 from app.api import recognise as recognise_router
 from app.api import recommendations as recommendations_router
+from app.api import users as users_router
 from app.config import settings
 from app.core.errors import (
     AppError,
@@ -218,6 +219,7 @@ def create_app() -> FastAPI:
     app.include_router(recognise_router.router, prefix=API_V1_PREFIX, tags=["recognition"])
     app.include_router(nutrition_router.router, prefix=API_V1_PREFIX, tags=["nutrition"])
     app.include_router(meals_router.router, prefix=API_V1_PREFIX, tags=["meals"])
+    app.include_router(users_router.router, prefix=API_V1_PREFIX, tags=["users"])
     app.include_router(meta_router.router, prefix=API_V1_PREFIX, tags=["meta"])
     app.include_router(
         recommendations_router.router, prefix=API_V1_PREFIX, tags=["recommendations"]
