@@ -70,7 +70,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Two candidate .env files, because the backend legitimately runs from two
+    # different working directories: `docker-compose` loads the repo-root `.env`
+    # (see its `env_file:`), while local `uvicorn`/`pytest` run from `backend/`.
+    # Listing both means one secret file at the repo root serves every entry point
+    # — the alternative was copying USDA_API_KEY and SECRET_KEY into a second
+    # gitignored file and keeping them in step by hand.
+    #
+    # Order matters: pydantic-settings gives *later* files priority, so a
+    # `backend/.env` (if someone creates one) overrides the shared root file,
+    # which is the more specific-wins behaviour you would expect. Real process
+    # environment variables still beat both.
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),
+        extra="ignore",
+    )
 
     # ---- App ----
     app_env: str = "development"

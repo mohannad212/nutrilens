@@ -65,7 +65,7 @@ from app.core.errors import (
 )
 from app.core.rate_limit import HourlyRateLimiter
 from app.integrations.usda_client import UsdaClient, select_best
-from app.integrations.usda_query_map import build_query
+from app.integrations.usda_query_map import build_query, build_query_chain
 
 BASE_URL = "https://api.nal.usda.gov/fdc/v1"
 
@@ -136,36 +136,104 @@ def client_raising(exc: Exception) -> UsdaClient:
 # ---------------------------------------------------------------------------
 # Query construction (08 §5)
 # ---------------------------------------------------------------------------
-def test_build_query_matches_the_spec_example():
-    # 08 §5 states this mapping explicitly; it is the contract's own illustration.
-    assert build_query("grilled_salmon", "grilled") == "salmon cooked grilled"
+def test_build_query_matches_the_spec_example_with_required_food_terms():
+    # 08 §5's illustration is `grilled_salmon` + `grilled` -> "salmon cooked
+    # grilled". The `+` is this project's addition, and it is not cosmetic: without
+    # it the live API answers that exact query with *Kielbasa*, because the method
+    # words outrank the food. See the usda_query_map docstring.
+    assert build_query("grilled_salmon", "grilled") == "+salmon cooked grilled"
 
 
 def test_build_query_strips_the_class_adjective_so_the_user_method_wins():
     # FR06 makes the user the authority: a salmon they baked must not be searched
     # as grilled just because Food-101 named the class that way.
-    assert build_query("grilled_salmon", "baked") == "salmon cooked baked"
+    assert build_query("grilled_salmon", "baked") == "+salmon cooked baked"
 
 
 def test_build_query_uses_the_override_table_for_dishes_usda_lacks():
-    assert build_query("beignets", "fried") == "doughnut cooked fried"
-    assert build_query("french_onion_soup", "boiled") == "soup onion cooked boiled"
+    assert build_query("beignets", "fried") == "+doughnut cooked fried"
+    assert build_query("french_onion_soup", "boiled") == "+soup +onion cooked boiled"
 
 
 def test_build_query_replaces_underscores_for_unmapped_classes():
-    assert build_query("chicken_curry", "other") == "chicken curry"
+    assert build_query("chocolate_mousse", "other") == "+chocolate +mousse"
 
 
 def test_build_query_deduplicates_repeated_tokens():
-    # `sashimi` -> "fish" + raw -> "fish raw"; no doubled term.
-    assert build_query("sashimi", "raw") == "fish raw"
-    # `onion_rings` override already contains "breaded"; fried adds cooked+fried.
-    assert build_query("fried_rice", "fried") == "rice cooked fried"
+    # `sashimi` -> "fish" + raw -> "+fish raw"; no doubled term.
+    assert build_query("sashimi", "raw") == "+fish raw"
+    assert build_query("fried_rice", "fried") == "+rice cooked fried"
 
 
 def test_build_query_tolerates_a_missing_cooking_method():
-    assert build_query("pizza", None) == "pizza"
-    assert build_query("pizza", "other") == "pizza"
+    assert build_query("hamburger", None) == "+hamburger"
+    assert build_query("hamburger", "other") == "+hamburger"
+
+
+def test_every_food_token_is_required_and_method_tokens_are_not():
+    # The asymmetry is the whole point: food terms constrain the result set,
+    # method terms only nudge the ranking within it.
+    query = build_query("french_onion_soup", "boiled")
+    assert query.startswith("+soup +onion")
+    assert "+cooked" not in query and "+boiled" not in query
+
+
+# ---------------------------------------------------------------------------
+# Query relaxation chain
+# ---------------------------------------------------------------------------
+def test_chain_relaxes_from_all_required_to_primary_only():
+    # `+rice +white` (sushi) matches nothing live, so the chain has to be able to
+    # drop back to the primary term rather than 404 a food USDA does stock.
+    chain = build_query_chain("sushi", "raw")
+    assert chain[0] == "+rice +white +cooked raw"
+    assert chain[1] == "+rice raw"
+    assert chain[-1] == "+rice"
+
+
+def test_chain_drops_method_words_last():
+    # Method words are dropped only at the final rung, because with nothing
+    # required they are what pulls "guacamole raw" to *Abiyuch, raw*.
+    chain = build_query_chain("guacamole", "raw")
+    assert chain[-1] == "+avocado"
+    assert all("avocado" in q for q in chain)
+
+
+def test_chain_has_no_duplicate_rungs():
+    # A single-token food with no method phrase collapses to one query rather
+    # than three identical ones — three identical requests would be three times
+    # the quota for the same answer.
+    assert build_query_chain("hamburger", "other") == ["+hamburger"]
+
+
+def test_client_walks_the_chain_until_something_matches(monkeypatch):
+    # First rung returns nothing (the over-constrained case), second answers.
+    responses = [{"foods": []}, {"foods": [food()]}]
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["query"])
+        return httpx.Response(200, json=responses[len(seen) - 1])
+
+    usda = UsdaClient("k", BASE_URL, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = usda.search("sushi", "raw")
+
+    assert result.fdc_id == "175168"
+    assert len(seen) == 2
+    assert seen[0] == "+rice +white +cooked raw"
+
+
+def test_no_match_only_after_the_whole_chain_is_exhausted():
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["query"])
+        return httpx.Response(200, json={"foods": []})
+
+    usda = UsdaClient("k", BASE_URL, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(NoNutritionMatchError):
+        usda.search("sushi", "raw")
+
+    assert len(seen) == 3  # every rung tried before giving up
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +307,47 @@ def test_prefers_foundation_over_sr_legacy():
         ]
     }
     assert select_best(payload["foods"]).fdc_id == "2"
+
+
+def test_preparation_match_outranks_data_type():
+    # Reproduces a real defect the live API exposed. Asking for *raw* tuna
+    # returned Foundation "canned in water" ahead of SR Legacy "fresh, bluefin,
+    # raw", because data type was the primary sort key. The canned entry is the
+    # better-measured food and the wrong one: raw and canned tuna differ in water,
+    # oil and sodium. Getting the food right comes before measurement quality.
+    payload = {
+        "foods": [
+            food(
+                fdc_id=1, description="Fish, tuna, light, canned in water", data_type="Foundation"
+            ),
+            food(fdc_id=2, description="Fish, tuna, fresh, bluefin, raw", data_type="SR Legacy"),
+        ]
+    }
+    assert select_best(payload["foods"], "raw").fdc_id == "2"
+
+
+def test_data_type_still_decides_when_preparation_cannot():
+    # With no preparation signal to separate them, 08 §5's data-type preference
+    # is the tiebreak — the flip above narrowed that rule, it did not remove it.
+    payload = {
+        "foods": [
+            food(fdc_id=1, description="Salmon, branded", data_type="Branded"),
+            food(fdc_id=2, description="Fish, salmon, raw", data_type="Foundation"),
+        ]
+    }
+    assert select_best(payload["foods"], "other").fdc_id == "2"
+
+
+def test_sr_legacy_heat_wording_counts_as_a_preparation_match():
+    # SR Legacy classifies by heat transfer, not by method: the grilled entry is
+    # "cooked, dry heat". Matching only the literal word would miss every one.
+    payload = {
+        "foods": [
+            food(fdc_id=1, description="Salmon nuggets, cooked as purchased, unheated"),
+            food(fdc_id=2, description="Fish, salmon, chinook, cooked, dry heat"),
+        ]
+    }
+    assert select_best(payload["foods"], "grilled").fdc_id == "2"
 
 
 def test_keeps_usda_relevance_order_within_one_data_type():
@@ -329,9 +438,9 @@ def test_request_carries_the_documented_search_parameters():
     request = captured[0]
     assert request.url.path.endswith("/foods/search")
     params = request.url.params
-    assert params["query"] == "salmon cooked grilled"
+    assert params["query"] == "+salmon cooked grilled"
     assert params["dataType"] == "Foundation,SR Legacy"
-    assert params["pageSize"] == "5"
+    assert params["pageSize"] == "10"
     assert params["api_key"] == "test-key"
 
 

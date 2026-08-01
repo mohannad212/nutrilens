@@ -21,7 +21,8 @@ and each needs a different fix:
    values. The class's adjective is a Food-101 dataset artefact, not the user's
    statement about their food; the cooking method they picked in the app is.
    So the adjective is stripped and the confirmed method is appended
-   (`08 §5`'s own example: `grilled_salmon` + `grilled` -> "salmon cooked grilled").
+   (`08 §5`'s own example: `grilled_salmon` + `grilled` -> "salmon cooked
+   grilled", which the next section then marks up as `+salmon cooked grilled`).
 2. **The class is a dish name USDA has never heard of.** `beignets`,
    `takoyaki`, `croque_madame` and friends do not exist as Foundation or
    SR Legacy entries. Searching them returns nothing, which surfaces to the user
@@ -29,6 +30,38 @@ and each needs a different fix:
    below maps those onto the closest term USDA *does* index.
 3. **Underscores are not word separators to a search engine.** `french_onion_soup`
    is one token; "french onion soup" is three.
+
+WHY FOOD TERMS ARE MARKED REQUIRED WITH `+`
+----------------------------------------------
+This is the single most important thing in the file, and it was learned by
+running the queries against the live API rather than by reasoning about them.
+
+USDA's search ranks on the whole query with every term optional by default. The
+cooking-method words are short, extremely common in food descriptions, and
+therefore dominate the score. The results are not subtly off — they are a
+different food entirely:
+
+    "salmon cooked grilled"  ->  Kielbasa, fully cooked, grilled       (337 kcal)
+    "pizza cooked baked"     ->  Pork, cured, bacon, cooked, baked
+    "hamburger cooked grilled" -> Kielbasa, fully cooked, grilled
+    "guacamole raw"          ->  Abiyuch, raw
+    "chicken curry cooked boiled" -> Chicken, feet, boiled
+
+Every one of those would have been shown to the user as their meal's nutrition,
+with no error and nothing to suggest anything had gone wrong. That is precisely
+the failure `08 §6` forbids — a fabricated number wearing the label of a real
+one — reached without anyone fabricating anything.
+
+Prefixing the food terms with USDA's `+` operator makes them **required**, and
+the same searches return salmon, pizza and hamburger. For the foods USDA has no
+entry for at all (`guacamole`, `sushi`) it returns *nothing*, which is the
+outcome we want: no match becomes an honest `404 NO_NUTRITION_MATCH` that the app
+can explain, instead of a confident wrong answer. Trading availability for
+truthfulness is the whole design stance of the nutrition path.
+
+(Quoted phrases — `"salmon" cooked` — were also tried. USDA answers those with a
+non-JSON error body, which the client correctly reports as an upstream failure,
+so quoting is not an option.)
 
 WHY A LOOKUP TABLE AND NOT SOMETHING CLEVERER
 ------------------------------------------------
@@ -64,14 +97,12 @@ of the portion+lookup approach, and it is why every response carries the
 
 DISCUSSION / DEFENSE QUESTIONS
 --------------------------------
-Q: "These mappings are unverified guesses. How do you know they work?"
-A: They are best-effort and are *not* individually validated against the live API
-   in this milestone (there is no API key wired yet). What is tested here is the
-   query *construction* logic — stripping, composition, deduplication — which is
-   the part with branches in it. Validating the 101 mappings against real USDA
-   responses is a one-off manual exercise against the deployed key
-   (`scripts/` smoke check), and a wrong mapping degrades to a poor match or a
-   clean 404, never to a fabricated number.
+Q: "These mappings are guesses. How do you know they work?"
+A: They were validated against the live API with `scripts/usda_smoke_check.py`,
+   which runs every Food-101 class through the real search and prints the food
+   USDA actually returns. That exercise is what produced the `+`-operator finding
+   above and corrected the overrides that resolved to the wrong food. Re-running
+   it is how you check the table after any change.
 
 Q: "Why strip the class's own adjective instead of trusting it?"
 A: Because FR06 makes the user the authority on their own meal. They explicitly
@@ -90,8 +121,12 @@ COMMON STUDENT MISTAKES
   misses.
 - Baking the cooking method into the override table, so the user's own choice is
   silently overridden by the dataset's.
-- Treating a missing override as an error. Most classes (`pizza`, `hamburger`,
-  `steak`) need no mapping at all — the fallback path is the common path.
+- Treating a missing override as an error. Roughly half the classes (`hamburger`,
+  `steak`, `lasagna`, `waffles`) need no mapping at all — the fallback path is a
+  common path, not an edge case.
+- Adding an override without re-running the smoke check. Several entries here
+  replaced earlier guesses that looked reasonable and resolved to the wrong food
+  (`pizza` -> Goldfish crackers, `ramen` -> the dry noodle block).
 """
 
 from __future__ import annotations
@@ -128,16 +163,21 @@ _METHOD_PHRASES: dict[str, str] = {
 # construction. Classes absent from this table fall back to the class name with
 # underscores replaced by spaces, which is correct for the majority
 # (`pizza`, `hamburger`, `steak`, `guacamole`, `hummus`, ...).
+#
+# Every entry below was checked against the live API with
+# `scripts/usda_smoke_check.py`; the comments record the food USDA actually
+# returns, so a future edit can be compared against what it replaces.
 USDA_QUERY_OVERRIDES: dict[str, str] = {
     # --- dishes USDA indexes only by their main ingredient ---
     "baby_back_ribs": "pork ribs",
-    "beef_carpaccio": "beef",
+    "beef_carpaccio": "beef tenderloin",  # plain "beef raw" -> cured corned beef
     "beef_tartare": "beef ground",
     "ceviche": "fish",
     "escargots": "snail",
     "filet_mignon": "beef tenderloin",
     "foie_gras": "goose liver pate",
     "fried_calamari": "squid",
+    "guacamole": "avocado",  # USDA has no "guacamole" at all
     "peking_duck": "duck",
     "prime_rib": "beef rib",
     "sashimi": "fish",
@@ -146,41 +186,66 @@ USDA_QUERY_OVERRIDES: dict[str, str] = {
     "takoyaki": "octopus",
     "tuna_tartare": "tuna",
     "edamame": "soybeans green",
+    # `oyster` alone matches "Emu, oyster" and "Mushrooms, oyster" — the
+    # shellfish only surfaces once the mollusc family is named.
+    "oysters": "mollusks oyster",
     # --- names USDA spells differently ---
+    "pizza": "pizza cheese",  # bare "pizza" -> Goldfish *crackers*
     "beignets": "doughnut",
     "donuts": "doughnut",
+    "churros": "doughnut",
+    "baklava": "danish pastry",
+    "cannoli": "danish pastry",
+    "samosa": "turnover",
+    "omelette": "omelet",  # USDA uses the American spelling
     "cup_cakes": "cake cupcake",
     "french_fries": "potato french fried",
     "frozen_yogurt": "yogurt frozen",
     "macarons": "cookie meringue",
-    "creme_brulee": "custard dessert",
+    "creme_brulee": "desserts flan",  # -> "Desserts, flan, caramel custard"
     "panna_cotta": "cream dessert",
-    "gnocchi": "pasta potato",
+    "gnocchi": "pasta",
     "onion_rings": "onion rings breaded",
+    "pancakes": "pancakes plain",  # bare "pancakes" -> "Potato pancakes"
+    "apple_pie": "pie apple prepared",  # "pie apple" -> canned pie *filling*
+    "bruschetta": "bread toasted",
+    "tiramisu": "cake cheesecake",
+    "bread_pudding": "pudding",
+    # --- rice dishes with no USDA entry of their own ---
+    # All four are approximated by their base grain; see the docstring note on
+    # composite dishes. The rice dominates the mass, and USDA indexes nothing
+    # closer.
+    "sushi": "rice white cooked",
+    "risotto": "rice white cooked",
+    "paella": "rice white cooked",
+    "bibimbap": "rice white cooked",
     # --- soups: USDA leads with "Soup," so the term order matters ---
     "clam_chowder": "soup clam chowder",
     "french_onion_soup": "soup onion",
     "hot_and_sour_soup": "soup hot sour",
-    "lobster_bisque": "soup lobster bisque",
-    "miso_soup": "soup miso",
+    "lobster_bisque": "soup bisque",  # -> tomato bisque; the cream drives the macros
+    "miso_soup": "soup vegetable canned",  # "miso" alone -> the *paste*, ~5x too concentrated
+    "ramen": "soup noodle",  # bare "ramen" -> the *dry* block, ~10x a prepared bowl
     "pho": "soup noodle beef",
     # --- composite dishes: name the dominant components (see docstring) ---
     "breakfast_burrito": "burrito breakfast",
-    "caprese_salad": "cheese mozzarella tomato",
+    "caprese_salad": "cheese mozzarella",
     "cheese_plate": "cheese",
+    "chicken_curry": "chicken",  # USDA has no curry; "chicken curry" -> chicken *spread*
     "chicken_quesadilla": "quesadilla chicken",
-    "club_sandwich": "sandwich turkey bacon",
+    "club_sandwich": "sandwich club",  # -> "Fast foods, ... bacon and tomato club sandwich"
     "crab_cakes": "crab cake",
     "croque_madame": "sandwich ham cheese",
-    "deviled_eggs": "egg",
+    "deviled_eggs": "egg whole",
+    "eggs_benedict": "egg whole",
+    "huevos_rancheros": "egg whole",
     "fish_and_chips": "fish battered",
-    "grilled_cheese_sandwich": "sandwich cheese",
-    "huevos_rancheros": "egg tortilla salsa",
+    "grilled_cheese_sandwich": "cheese cheddar",
     "lobster_roll_sandwich": "lobster sandwich",
     "macaroni_and_cheese": "macaroni cheese",
     "pad_thai": "noodles rice",
-    "poutine": "potato french fried gravy",
-    "pulled_pork_sandwich": "pork shoulder sandwich",
+    "poutine": "potato french fried",
+    "pulled_pork_sandwich": "pork shoulder",
     "red_velvet_cake": "cake chocolate frosted",
     "shrimp_and_grits": "shrimp grits",
     "spaghetti_bolognese": "spaghetti meat sauce",
@@ -188,6 +253,14 @@ USDA_QUERY_OVERRIDES: dict[str, str] = {
     "spring_rolls": "egg roll vegetable",
     "strawberry_shortcake": "cake shortcake strawberry",
     "gyoza": "dumpling pork",
+    # Leaf salads. USDA indexes no composite salad, and the plausible-looking
+    # alternatives are worse than the leaf: "caesar salad" matches the *dressing*
+    # (542 kcal/100 g), "greek salad" matches Greek *yogurt*, and a bare "salad"
+    # matches tuna salad. The leaf is the honest dominant ingredient — it
+    # under-reports the dressing, oil and cheese, which is a real and documented
+    # limitation of the whole lookup approach rather than of these two entries.
+    "caesar_salad": "lettuce",
+    "greek_salad": "lettuce",
 }
 
 
@@ -223,16 +296,83 @@ def _dedupe(tokens: list[str]) -> list[str]:
 
 
 def build_query(food101_class: str, cooking_method: str | None = None) -> str:
-    """Build the USDA `/foods/search` query string for a class + cooking method.
+    """The primary USDA query for a class + cooking method.
 
-    `08 §5`'s worked example holds: ``build_query("grilled_salmon", "grilled")``
-    returns ``"salmon cooked grilled"``.
+    Food terms are marked **required** with USDA's `+` operator; the cooking
+    method is left optional so it influences ranking without excluding anything.
+    ``build_query("grilled_salmon", "grilled")`` returns
+    ``"+salmon cooked grilled"``.
 
     An unknown or `None` cooking method contributes nothing rather than raising —
     the request schema (`03 §5`) has already restricted the value to the enum, and
     a search for the food alone is a strictly better failure mode than a 500.
     """
+    return build_query_chain(food101_class, cooking_method)[0]
+
+
+def build_query_chain(food101_class: str, cooking_method: str | None = None) -> list[str]:
+    """Progressively relaxed queries, most precise first (see the module docstring).
+
+    The caller tries each in order and stops at the first that yields a usable
+    match. Three rungs, and each exists because the one above it fails in a
+    specific, observed way:
+
+    1. ``+every +food +term  method phrase`` — all food terms required. Correct
+       when USDA indexes the dish under all of them (`+soup +onion` -> "Soup,
+       onion, canned, condensed").
+    2. ``+primary term  method phrase`` — only the first food term required.
+       Rung 1 over-constrains for composite overrides: `+rice +fish` (sushi)
+       matches nothing at all, because no single USDA food is indexed under both.
+    3. ``+primary term`` — no method words at all. They are dropped last because
+       they are the ranking poison described above: with them present and nothing
+       required, "guacamole raw" returns *Abiyuch, raw*.
+
+    The list is deduplicated, so a single-token food with no cooking method
+    produces one query rather than three identical ones.
+    """
     term = base_term(food101_class)
     phrase = _METHOD_PHRASES.get(cooking_method or "", "")
-    tokens = f"{term} {phrase}".lower().split()
-    return " ".join(_dedupe(tokens))
+    food_tokens = _dedupe(term.lower().split())
+    if not food_tokens:  # defensive: base_term never returns empty in practice
+        return [term.lower()]
+
+    phrase_tokens = [t for t in phrase.lower().split() if t not in food_tokens]
+    suffix = (" " + " ".join(phrase_tokens)) if phrase_tokens else ""
+
+    all_required = " ".join(f"+{t}" for t in food_tokens)
+    primary_required = f"+{food_tokens[0]}"
+
+    chain = [
+        f"{all_required}{suffix}",
+        f"{primary_required}{suffix}",
+        primary_required,
+    ]
+    return _dedupe(chain)
+
+
+# Which words in a USDA description indicate the preparation the user confirmed.
+# Used to re-rank candidates, not to filter them (`usda_client.select_best`).
+#
+# "dry heat" and "moist heat" are here because SR Legacy almost never says
+# "grilled" or "boiled" — it classifies by heat transfer, so "Fish, salmon,
+# chinook, cooked, dry heat" is the grilled/baked/roasted entry and looking only
+# for the literal method word would miss every one of them.
+METHOD_DESCRIPTION_HINTS: dict[str, tuple[str, ...]] = {
+    "grilled": ("grilled", "broiled", "dry heat"),
+    "fried": ("fried", "pan-fried"),
+    "baked": ("baked", "dry heat"),
+    "roasted": ("roasted", "dry heat"),
+    "boiled": ("boiled", "simmered", "moist heat"),
+    "steamed": ("steamed", "moist heat"),
+    "raw": ("raw",),
+    "other": (),
+}
+
+
+def description_matches_method(description: str, cooking_method: str | None) -> bool:
+    """Whether a USDA description looks like the preparation the user confirmed."""
+    hints = METHOD_DESCRIPTION_HINTS.get(cooking_method or "", ())
+    if not hints:
+        return False
+    lowered = description.lower()
+    return any(hint in lowered for hint in hints)

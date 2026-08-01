@@ -25,29 +25,44 @@ object — which is exactly how M5's tests run without a network or an API key
 
 HOW IT WORKS INTERNALLY
 --------------------------
-`search(food101_class, cooking_method)` runs four steps:
+`search(food101_class, cooking_method)` walks a chain of progressively relaxed
+queries from `usda_query_map.build_query_chain`, and for each one:
 
-1. **Build the query.** Delegated to `usda_query_map.build_query` — the Food-101
-   class and the user's confirmed cooking method become one search string.
-2. **Spend budget.** The `HourlyRateLimiter` is consulted *before* the request, so
+1. **Spend budget.** The `HourlyRateLimiter` is consulted *before* the request, so
    an exhausted budget costs nothing and raises `UsdaRateLimitedError`
    immediately.
-3. **Call `GET /foods/search`** with `dataType=Foundation,SR Legacy`,
-   `pageSize=5`. Transport failures, 5xx and 429 are translated into the three
+2. **Call `GET /foods/search`** with `dataType=Foundation,SR Legacy`,
+   `pageSize=10`. Transport failures, 5xx and 429 are translated into the three
    typed errors below; nothing `httpx` raises escapes this module.
-4. **Pick a match and read its nutrients.** Candidates are re-sorted by data-type
-   trust, then the first one that yields all four macros wins.
+3. **Pick a match and read its nutrients.** Candidates are re-sorted (see below),
+   and the first that yields all four macros wins.
+
+An empty or unusable page moves to the next, looser query; only when the whole
+chain is exhausted does the caller get `NoNutritionMatchError`. In practice the
+first query answers for anything USDA indexes directly, and the later rungs only
+run for composite dishes where requiring every term matches nothing.
 
 WHY THE RESULTS ARE RE-SORTED
 --------------------------------
-USDA returns results by its own relevance score, which does not know that the
-datasets differ in trustworthiness. `08 §5` requires preferring **Foundation** and
-**SR Legacy** — foods whose values come from laboratory analysis — over
-**Branded**, whose values are self-reported by manufacturers from a label. The
-request already filters to the two lab-verified types, so this ordering is
-belt-and-braces: it keeps the preference correct if the filter is ever relaxed,
-and it makes the ranking policy explicit and testable rather than implicit in a
-query parameter.
+USDA returns results by its own relevance score, which knows neither how the user
+cooked their food nor that the datasets differ in trustworthiness. Two keys fix
+that, and the order between them was itself a bug worth recording.
+
+**Preparation first.** A description matching the confirmed cooking method sorts
+ahead of one that does not. Raw, canned and cooked versions of the same
+ingredient are nutritionally different foods, so this is a question of *which food
+this is*.
+
+**Data type second.** `08 §5` requires preferring **Foundation** and **SR
+Legacy** — laboratory-analysed — over **Branded**, whose values are
+manufacturer-supplied from a label. The request already filters to the two
+lab-verified types, so this is also belt-and-braces if that filter is relaxed.
+
+The original implementation had these the other way round, and the live API
+exposed why that is wrong: a request for raw tuna returned Foundation "Fish, tuna,
+light, canned in water" ahead of SR Legacy "Fish, tuna, fresh, bluefin, raw". The
+canned entry is the better-measured of the two and the wrong answer. Measurement
+quality cannot compensate for being the wrong food.
 
 WHY BOTH NUTRIENT ID SCHEMES ARE HANDLED
 -------------------------------------------
@@ -67,9 +82,10 @@ An absent nutrient is not a zero. If USDA does not report fat for a food, that i
 missing data, and defaulting it to `0.0` would put a fabricated number on the
 user's plate — the precise thing `08 §6` prohibits, and worse than an error
 because it looks like an answer. So a candidate that cannot supply all four
-macros is passed over, and if none of the five can, the caller gets
-`NoNutritionMatchError`. In practice Foundation and SR Legacy foods carry all
-four; this is the guard for the exception, not the common path.
+macros is passed over, and if no candidate in the whole query chain can supply
+them, the caller gets `NoNutritionMatchError`. In practice Foundation and SR
+Legacy foods carry all four; this is the guard for the exception, not the common
+path.
 
 WHY SYNCHRONOUS, WHEN `08 §5` SAYS ASYNC
 -------------------------------------------
@@ -102,9 +118,19 @@ A: It is converted at the defined constant (1 kcal = 4.184 kJ). That is a unit
    change on a measured value, not an estimate — no information is invented — and
    the alternative is a spurious 404 on a food USDA has full data for.
 
-Q: "Why `pageSize=5` rather than 1?"
-A: The top hit occasionally lacks a macro or is a less apt data type. Five gives
-   the selection logic something to fall through to, and the response is small.
+Q: "Why `pageSize=10` rather than 1?"
+A: With the food terms required, the whole page is the right *food* and the
+   variation between rows is how it was prepared — which is exactly what the
+   re-ranking above chooses between. A page of one would hand that decision back
+   to USDA's relevance score, which does not know the user's cooking method. It
+   also gives the parser something to fall through to when a row lacks a macro.
+
+Q: "Three requests for one lookup, in the worst case. Is that acceptable?"
+A: It is the worst case, not the normal one — the chain stops at the first query
+   that answers, and after the first lookup for a food the result is cached
+   (`08 §6`), so the whole chain runs at most once per (food, cooking method) per
+   TTL. The alternative is a looser single query, which is what returned Kielbasa
+   for salmon.
 
 COMMON STUDENT MISTAKES
 --------------------------
@@ -132,7 +158,7 @@ from app.core.errors import (
     UsdaUnavailableError,
 )
 from app.core.rate_limit import HourlyRateLimiter
-from app.integrations.usda_query_map import build_query
+from app.integrations.usda_query_map import build_query_chain, description_matches_method
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +173,10 @@ _UNRANKED_DATA_TYPE = 99
 
 # The `dataType` filter sent to USDA. Comma-separated per their API.
 SEARCH_DATA_TYPES = "Foundation,SR Legacy"
-SEARCH_PAGE_SIZE = 5
+# Ten rather than five so the preparation re-ranking in `select_best` has enough
+# candidates to choose between — with `+`-required food terms the whole page is
+# the right food, and the useful variation is in how it was cooked.
+SEARCH_PAGE_SIZE = 10
 
 # Nutrient identities, in both schemes USDA uses (see the module docstring).
 # (modern INFOODS id, legacy SR number)
@@ -267,16 +296,38 @@ def parse_food(raw: dict[str, Any]) -> UsdaFood | None:
     )
 
 
-def select_best(foods: list[dict[str, Any]]) -> UsdaFood | None:
+def select_best(foods: list[dict[str, Any]], cooking_method: str | None = None) -> UsdaFood | None:
     """Pick the most trustworthy complete hit (`08 §5`).
 
-    Sorted by data-type trust with `sorted`'s stability preserving USDA's own
-    relevance order inside each tier, so the choice is "the best-scored result of
-    the most trusted available dataset".
+    Two ranking keys, in order:
+
+    1. **Preparation match** — a description that looks like the method the user
+       confirmed sorts ahead of one that does not.
+    2. **Data-type trust** — Foundation, then SR Legacy, then anything else.
+
+    Preparation is checked *first*, and the ordering is deliberate. `08 §5` asks
+    for the data-type preference, and it is still here — but with data type
+    leading, a request for raw tuna returned *Foundation* "Fish, tuna, light,
+    canned in water" ahead of *SR Legacy* "Fish, tuna, fresh, bluefin, raw". Both
+    are real USDA foods and the canned one is the better-measured of the two, but
+    it is not the food the user said they ate: raw and canned tuna differ in water
+    content, oil and sodium. Data type is a statement about *measurement quality*;
+    preparation is a statement about *which food this is*. Being right about the
+    food has to come first, and a lab-measured value for the wrong preparation is
+    still the wrong answer.
+
+    This is also what separates "Fish, salmon, chinook, cooked, dry heat" from
+    "Salmon nuggets, cooked as purchased, unheated" when both are salmon and both
+    are SR Legacy. USDA's own relevance cannot make either call, because it does
+    not know which preparation the user chose. Sorting is stable, so within a tier
+    USDA's relevance order still decides.
     """
     ranked = sorted(
         (f for f in foods if isinstance(f, dict)),
-        key=lambda f: _DATA_TYPE_RANK.get(str(f.get("dataType", "")), _UNRANKED_DATA_TYPE),
+        key=lambda f: (
+            0 if description_matches_method(str(f.get("description", "")), cooking_method) else 1,
+            _DATA_TYPE_RANK.get(str(f.get("dataType", "")), _UNRANKED_DATA_TYPE),
+        ),
     )
     for candidate in ranked:
         parsed = parse_food(candidate)
@@ -313,36 +364,47 @@ class UsdaClient:
     def search(self, food101_class: str, cooking_method: str | None = None) -> UsdaFood:
         """Look up per-100 g macros for a food, or raise one of the three typed errors.
 
+        Walks the progressively relaxed query chain from `usda_query_map`, stopping
+        at the first query that yields a usable match. Each attempt is a real
+        request and spends rate-limit budget; in practice the first rung answers
+        for foods USDA indexes, and the later rungs only run for the composite
+        dishes where requiring every term matches nothing.
+
         Raises:
             UsdaRateLimitedError: local hourly budget spent, or USDA returned 429.
             UsdaUnavailableError: timeout, transport failure, 5xx, or a rejected key.
-            NoNutritionMatchError: USDA answered, but with nothing usable.
+            NoNutritionMatchError: every query in the chain came back unusable.
         """
-        query = build_query(food101_class, cooking_method)
+        chain = build_query_chain(food101_class, cooking_method)
 
-        if self._rate_limiter is not None and not self._rate_limiter.acquire():
-            logger.warning("USDA hourly budget exhausted; refusing lookup for %r", query)
-            raise UsdaRateLimitedError()
+        for query in chain:
+            if self._rate_limiter is not None and not self._rate_limiter.acquire():
+                logger.warning("USDA hourly budget exhausted; refusing lookup for %r", query)
+                raise UsdaRateLimitedError()
 
-        payload = self._get_search(query)
+            payload = self._get_search(query)
+            foods = payload.get("foods")
+            if not isinstance(foods, list) or not foods:
+                logger.debug("USDA had no hits for %r; relaxing the query", query)
+                continue
 
-        foods = payload.get("foods")
-        if not isinstance(foods, list) or not foods:
-            raise NoNutritionMatchError(
-                f"USDA has no entry matching '{query}'.",
-                details={"query": query, "food101_class": food101_class},
-            )
+            best = select_best(foods, cooking_method)
+            if best is None:
+                # Rows came back, but none carried a complete macro set. Relaxing
+                # widens the candidate pool, so it is worth trying the next rung.
+                logger.debug("USDA hits for %r carried no complete macros", query)
+                continue
 
-        best = select_best(foods)
-        if best is None:
-            # USDA returned rows, but none carried a complete macro set.
-            raise NoNutritionMatchError(
-                f"USDA returned no complete nutrition data for '{query}'.",
-                details={"query": query, "food101_class": food101_class},
-            )
+            logger.info("USDA match for %r -> fdc_id=%s (%s)", query, best.fdc_id, best.description)
+            return best
 
-        logger.info("USDA match for %r -> fdc_id=%s (%s)", query, best.fdc_id, best.description)
-        return best
+        # Nothing in the chain produced a usable food. This is the honest outcome
+        # for a dish USDA genuinely does not index, and it is deliberately
+        # preferred over the wrong-food match a looser query would have returned.
+        raise NoNutritionMatchError(
+            f"USDA has no usable entry for '{chain[0]}'.",
+            details={"queries": chain, "food101_class": food101_class},
+        )
 
     def _get_search(self, query: str) -> dict[str, Any]:
         """Perform the HTTP call, mapping every upstream failure onto a typed error."""
