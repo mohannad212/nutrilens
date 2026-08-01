@@ -182,6 +182,34 @@ class InferenceFailedError(AppError):
     message = "The model failed to process this image."
 
 
+# ---- USDA / nutrition lookup (FR07, FR08 — raised by M5's usda_client) ----
+# All three are *terminal* failures: the caller (nutrition_service) reaches them
+# only after the cache has already been consulted and missed (`08 §6`). Their
+# separation matters because the app reacts differently to each — a rate limit is
+# "try again shortly", an outage is "not your fault, try again later", and no
+# match is "we genuinely have no data for this food", which is the only one where
+# retrying is pointless. Fabricating a plausible number instead of raising any of
+# them is the one thing `08 §6` forbids outright.
+
+
+class UsdaRateLimitedError(AppError):
+    status_code = 429
+    code = "USDA_RATE_LIMITED"
+    message = "Nutrition lookups are temporarily rate limited. Please try again shortly."
+
+
+class UsdaUnavailableError(AppError):
+    status_code = 502
+    code = "USDA_UNAVAILABLE"
+    message = "The nutrition database is unavailable and this food is not cached."
+
+
+class NoNutritionMatchError(AppError):
+    status_code = 404
+    code = "NO_NUTRITION_MATCH"
+    message = "No nutrition data could be found for this food."
+
+
 def _envelope(code: str, message: str, details: Any | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {"code": code, "message": message}
     if details is not None:

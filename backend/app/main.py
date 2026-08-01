@@ -68,6 +68,9 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import auth as auth_router
+from app.api import meals as meals_router
+from app.api import meta as meta_router
+from app.api import nutrition as nutrition_router
 from app.api import recognise as recognise_router
 from app.api import recommendations as recommendations_router
 from app.config import settings
@@ -77,6 +80,8 @@ from app.core.errors import (
     http_exception_handler,
     validation_error_handler,
 )
+from app.core.rate_limit import HourlyRateLimiter
+from app.integrations.usda_client import UsdaClient
 from app.ml.classifier import load_classifier
 from app.ml.portion import PortionEstimator
 from app.ml.portion.container_model import load_container_model
@@ -173,7 +178,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         app.state.portion_estimator = None
         logger.info("Portion estimation disabled (portion_enabled=false)")
+
+    # M5 USDA client (08 §5-6). Built once so its httpx connection pool and its
+    # hourly budget are shared process-wide rather than per request. Construction
+    # touches no network, so unlike the models there is nothing to fail here — a
+    # missing API key becomes an honest 502 at call time (and is warned about now,
+    # because "why is every nutrition lookup failing" is a question worth answering
+    # in the startup log rather than the access log).
+    if not settings.usda_api_key:
+        logger.warning("USDA_API_KEY is not set; nutrition lookups will fail with 502")
+    app.state.usda_client = UsdaClient(
+        settings.usda_api_key,
+        settings.usda_base_url,
+        timeout=settings.usda_timeout_seconds,
+        rate_limiter=HourlyRateLimiter(settings.usda_rate_limit_per_hour),
+    )
+
     yield
+
+    # Release the USDA connection pool. The models are read-only and need no
+    # teardown, but an httpx.Client holds real sockets.
+    app.state.usda_client.close()
 
 
 def create_app() -> FastAPI:
@@ -191,6 +216,9 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router.router, prefix=f"{API_V1_PREFIX}/auth", tags=["auth"])
     app.include_router(recognise_router.router, prefix=API_V1_PREFIX, tags=["recognition"])
+    app.include_router(nutrition_router.router, prefix=API_V1_PREFIX, tags=["nutrition"])
+    app.include_router(meals_router.router, prefix=API_V1_PREFIX, tags=["meals"])
+    app.include_router(meta_router.router, prefix=API_V1_PREFIX, tags=["meta"])
     app.include_router(
         recommendations_router.router, prefix=API_V1_PREFIX, tags=["recommendations"]
     )

@@ -95,9 +95,11 @@ from fastapi import Depends, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.errors import AccountLockedError, InferenceFailedError, UnauthorizedError
 from app.db.base import SessionLocal
 from app.db.models import User
+from app.integrations.usda_client import UsdaClient
 from app.ml.classifier import FoodClassifier
 from app.ml.portion import PortionEstimator
 from app.security import decode_access_token
@@ -155,6 +157,29 @@ def get_classifier(request: Request) -> FoodClassifier:
     if classifier is None:
         raise InferenceFailedError("The recognition model is not available.")
     return classifier
+
+
+def get_usda_client(request: Request) -> UsdaClient:
+    """Hand the request the one `UsdaClient` built at startup.
+
+    Built once by the lifespan (`main.py`) so its `httpx.Client` connection pool
+    is shared across requests rather than re-established per lookup. Unlike the
+    classifier, construction cannot fail — there is no artefact to load — so this
+    never raises; a *missing API key* surfaces later as the documented 502 from
+    the client itself, which is honest about what actually went wrong.
+
+    Injecting it as a dependency is also what makes M5 testable without a network:
+    tests override this with a stub client (`08 §9`).
+    """
+    client: UsdaClient | None = getattr(request.app.state, "usda_client", None)
+    if client is None:  # pragma: no cover - only reachable if the lifespan is skipped
+        client = UsdaClient(
+            settings.usda_api_key,
+            settings.usda_base_url,
+            timeout=settings.usda_timeout_seconds,
+        )
+        request.app.state.usda_client = client
+    return client
 
 
 def get_portion_estimator(request: Request) -> PortionEstimator | None:

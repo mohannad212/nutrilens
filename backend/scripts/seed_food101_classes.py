@@ -87,9 +87,27 @@ from app.db.models import FoodItem  # noqa: E402
 LABELS_PATH = Path(__file__).resolve().parent.parent / "models" / "labels_food101.json"
 
 
+def load_class_names(path: Path) -> list[str]:
+    """Read the class labels, accepting either shape `labels_food101.json` may take.
+
+    The file the training track exports is an **index -> class map**
+    (`{"0": "apple_pie", ...}`), which is what `ml/classifier.py` needs to turn a
+    logit index back into a label. Iterating that dict yields its *keys*, so
+    reading it as a flat list silently seeds 101 rows whose `food101_class` is
+    `"0"`..`"100"` — rows that then never match a real lookup, quietly turning M5's
+    nutrition cache into a permanent miss. Both shapes are handled here because
+    both are plausible exports and the failure mode of guessing wrong is invisible
+    until a milestone two steps away misbehaves.
+    """
+    raw = json.loads(path.read_text())
+    if isinstance(raw, dict):
+        # Sort by the numeric index so the seed order matches the label indices.
+        return [raw[key] for key in sorted(raw, key=int)]
+    return list(raw)
+
+
 def seed_food101_classes() -> None:
-    with open(LABELS_PATH) as f:
-        classes: list[str] = json.load(f)
+    classes = load_class_names(LABELS_PATH)
 
     db = SessionLocal()
     try:

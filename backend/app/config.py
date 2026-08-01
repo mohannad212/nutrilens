@@ -86,10 +86,18 @@ class Settings(BaseSettings):
     # ---- Database ----
     database_url: str = "postgresql+psycopg://nutrilens:password@localhost:5432/nutrilens"
 
-    # ---- USDA FoodData Central (used later, but declared now) ----
+    # ---- USDA FoodData Central (M5; see 08 §5-6) ----
     usda_api_key: str = ""
     usda_base_url: str = "https://api.nal.usda.gov/fdc/v1"
     usda_rate_limit_per_hour: int = 3600
+    # Per-request ceiling on the USDA call. Deliberately well under the 5 s
+    # Performance NFR for the whole photo->nutrition path, since a lookup is only
+    # one step of it and a slow upstream must not consume the entire budget.
+    usda_timeout_seconds: float = 10.0
+    # Cache freshness (08 §6). A cached food_item older than this is refreshed from
+    # USDA on next use — but is still served if USDA is unreachable, which is the
+    # whole point of tracking staleness separately from validity. 0 disables expiry.
+    nutrition_cache_ttl_days: int = 180
 
     # ---- ML / model serving (declared now, consumed by M3) ----
     model_dir: str = "./models"
