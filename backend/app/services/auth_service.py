@@ -124,6 +124,13 @@ def register_user(db: Session, payload: RegisterRequest) -> User:
         email=payload.email,
         password_hash=hash_password(payload.password),
         health_goal=payload.health_goal,
+        # Optional body metrics (M7): absent -> NULL, and the recommendation
+        # engine falls back to a descriptive calorie note (06 §2).
+        height_cm=payload.height_cm,
+        weight_kg=payload.weight_kg,
+        birth_year=payload.birth_year,
+        sex=payload.sex,
+        activity_level=payload.activity_level,
     )
     db.add(user)
     db.commit()

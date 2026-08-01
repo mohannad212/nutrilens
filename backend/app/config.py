@@ -70,7 +70,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # Two candidate .env files, because the backend legitimately runs from two
+    # different working directories: `docker-compose` loads the repo-root `.env`
+    # (see its `env_file:`), while local `uvicorn`/`pytest` run from `backend/`.
+    # Listing both means one secret file at the repo root serves every entry point
+    # — the alternative was copying USDA_API_KEY and SECRET_KEY into a second
+    # gitignored file and keeping them in step by hand.
+    #
+    # Order matters: pydantic-settings gives *later* files priority, so a
+    # `backend/.env` (if someone creates one) overrides the shared root file,
+    # which is the more specific-wins behaviour you would expect. Real process
+    # environment variables still beat both.
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),
+        extra="ignore",
+    )
 
     # ---- App ----
     app_env: str = "development"
@@ -86,14 +100,23 @@ class Settings(BaseSettings):
     # ---- Database ----
     database_url: str = "postgresql+psycopg://nutrilens:password@localhost:5432/nutrilens"
 
-    # ---- USDA FoodData Central (used later, but declared now) ----
+    # ---- USDA FoodData Central (M5; see 08 §5-6) ----
     usda_api_key: str = ""
     usda_base_url: str = "https://api.nal.usda.gov/fdc/v1"
     usda_rate_limit_per_hour: int = 3600
+    # Per-request ceiling on the USDA call. Deliberately well under the 5 s
+    # Performance NFR for the whole photo->nutrition path, since a lookup is only
+    # one step of it and a slow upstream must not consume the entire budget.
+    usda_timeout_seconds: float = 10.0
+    # Cache freshness (08 §6). A cached food_item older than this is refreshed from
+    # USDA on next use — but is still served if USDA is unreachable, which is the
+    # whole point of tracking staleness separately from validity. 0 disables expiry.
+    nutrition_cache_ttl_days: int = 180
 
     # ---- ML / model serving (declared now, consumed by M3) ----
     model_dir: str = "./models"
     classifier_weights: str = "food101_efficientnet_b4.pth"
+    classifier_labels: str = "labels_food101.json"
     confidence_threshold: float = 0.60
     device: str = "cpu"
 
@@ -102,9 +125,61 @@ class Settings(BaseSettings):
     min_image_width: int = 640
     min_image_height: int = 480
 
-    # ---- Recommendations (used later by M7) ----
+    # ---- Image quality gate (FR03 extension; reject un-recognisable photos) ----
+    # A *rejection* gate, not an enhancement: it never alters pixels (which would
+    # cause train/serve skew), it only asks the user to retake a clearly bad
+    # photo. Thresholds are deliberately conservative so real food photos always
+    # pass; flip `quality_gate_enabled` off to disable during evaluation.
+    quality_gate_enabled: bool = True
+    brightness_min: float = 30.0  # mean luma 0-255; below this = too dark
+    brightness_max: float = 235.0  # above this = washed out / overexposed
+    blur_laplacian_min: float = 60.0  # variance of Laplacian; below this = too blurry
+
+    # ---- Portion estimation (FR05, M4; see 05-portion-estimation.md) ----
+    # Master switch: off => /recognise omits the `portion` object (classification
+    # only, exactly like M3) so the endpoint still works if the pipeline is
+    # disabled for evaluation.
+    portion_enabled: bool = True
+    # Symmetric uncertainty bands (± fraction) for the stages whose band is a fixed
+    # constant (05 §4). A precise reference object gives a tight band; shape-only
+    # (no scale cue at all) is the widest. NOTE: the container-prior band is NOT a
+    # constant — it is derived from the container's own min/max size range (squared,
+    # since mass ∝ size²) in `container_priors.uncertainty_band`, so it widens
+    # honestly for vaguely-sized containers. `portion_eps_container` is retained
+    # only as a reference/fallback value and is not used by the estimator.
+    portion_eps_reference: float = 0.12  # method="reference_object"
+    portion_eps_container: float = 0.25  # (reference only; band is range-derived)
+    portion_eps_shape_only: float = 0.35  # method="shape_only"
+    # Shape-only fallback (05 §4): with no reference and no container, assume the
+    # image frame spans this many cm horizontally (typical arm's-length food
+    # photo) to derive a coarse cm-per-pixel scale from the image width alone.
+    portion_shape_only_frame_width_cm: float = 26.0
+    # Two references agreeing within this fraction are averaged (05 §4).
+    portion_reference_agree_tol: float = 0.15
+    # Stage-1 container classifier (M4 aux model, trained in training/portion).
+    # Loaded from `model_dir` at startup when present; absent -> portion falls back
+    # to shape_only (graceful, like the food model). Same TorchScript convention.
+    container_weights: str = "container_classifier.pth"
+    container_labels: str = "labels_container.json"
+    # Stage-2 reference-object detector (off-the-shelf COCO: fork/spoon/knife).
+    # OPT-IN: enabling it downloads a pretrained torchvision detector once at
+    # startup, so it is off by default. When on, reference objects give the
+    # tightest, plate-independent scale (05 §4).
+    reference_detector_enabled: bool = False
+    reference_score_threshold: float = 0.5
+    # Food segmentation model (05 §6). Loaded from `model_dir` when present; absent
+    # -> the estimator uses the classical GrabCut fallback, then a central box.
+    segmenter_weights: str = "food_segmenter.pth"
+
+    # ---- Recommendations (FR12, M7; see 06-recommendation-engine.md) ----
     min_meals_for_recommendation: int = 7
     recommendation_window_days: int = 7
+    # Idempotency window (06 §3): a GET inside this many hours of the last
+    # generation, with no meal logged since, returns the stored rows instead of
+    # regenerating. Stops the insight text churning on every screen open, which
+    # would read as instability rather than as freshness. POST
+    # /recommendations/refresh bypasses it.
+    recommendation_cache_hours: int = 6
 
 
 # Single, importable instance — created once at process startup.

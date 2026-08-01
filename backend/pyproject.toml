@@ -60,6 +60,7 @@ extend-immutable-calls = [
   "fastapi.Query",
   "fastapi.Path",
   "fastapi.Body",
+  "fastapi.File",
 ]
 
 [tool.mypy]
@@ -67,6 +68,16 @@ python_version = "3.11"
 strict = true
 ignore_missing_imports = true
 plugins = []
+
+# Don't type-check the internals of heavy ML libraries. numpy ships py.typed
+# stubs that use 3.12-only `type X = ...` syntax, which trips mypy under our
+# pinned python_version=3.11 (and would abort `mypy app` now that app code
+# imports torch). We still type-check our own code; we just don't follow into
+# these third-party packages.
+[[tool.mypy.overrides]]
+module = ["numpy.*", "torch.*", "torchvision.*", "PIL.*", "cv2.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

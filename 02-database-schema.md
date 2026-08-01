@@ -47,9 +47,16 @@ irreversibly removes everything the user owns, while preserving the shared USDA 
 | created_at | TIMESTAMP | DEFAULT now() | Account creation |
 | account_locked | BOOLEAN | DEFAULT FALSE | TRUE after 5 consecutive failed logins (FR02) |
 | failed_login_count | SMALLINT | DEFAULT 0 | Reset to 0 on success; increments on failure |
+| height_cm | NUMERIC(4,1) | NULL | Body metric for the TDEE estimate (`06 §2`) |
+| weight_kg | NUMERIC(5,1) | NULL | " |
+| birth_year | SMALLINT | NULL | Year only — age in whole years is all Mifflin-St Jeor needs |
+| sex | ENUM(`female`,`male`) | NULL | Sex-specific constant in the BMR equation |
+| activity_level | ENUM(`sedentary`,`light`,`moderate`,`active`,`very_active`) | NULL | TDEE activity multiplier |
 
 ```sql
-CREATE TYPE health_goal_enum AS ENUM ('weight_loss', 'maintenance', 'weight_gain');
+CREATE TYPE health_goal_enum   AS ENUM ('weight_loss', 'maintenance', 'weight_gain');
+CREATE TYPE sex_enum           AS ENUM ('female', 'male');
+CREATE TYPE activity_level_enum AS ENUM ('sedentary','light','moderate','active','very_active');
 
 CREATE TABLE "user" (
     user_id             SERIAL PRIMARY KEY,
@@ -59,10 +66,31 @@ CREATE TABLE "user" (
     health_goal         health_goal_enum NOT NULL,
     created_at          TIMESTAMP    NOT NULL DEFAULT now(),
     account_locked      BOOLEAN      NOT NULL DEFAULT FALSE,
-    failed_login_count  SMALLINT     NOT NULL DEFAULT 0
+    failed_login_count  SMALLINT     NOT NULL DEFAULT 0,
+    -- Optional body metrics (M7). See the note below on why every one is NULL-able.
+    height_cm           NUMERIC(4,1),
+    weight_kg           NUMERIC(5,1),
+    birth_year          SMALLINT,
+    sex                 sex_enum,
+    activity_level      activity_level_enum
 );
 CREATE INDEX idx_user_email ON "user"(email);
 ```
+
+**Why the five body metrics are all nullable.** They exist only so `06`'s calorie
+insight can compare a user's intake against their own estimated needs (Mifflin-St Jeor
+TDEE) instead of against a population average, which in a nutrition app would be a
+fabricated number presented as personal advice. Every *other* insight is a macro
+**ratio** and needs no body data at all, so a user who supplies none of these still
+gets the full macro analysis — only the calorie line softens to a descriptive
+observation naming the fields still needed. Making them `NOT NULL` would have been a
+breaking change to FR01's registration form and would have locked out existing
+accounts. `sex` has exactly two values because the BMR equation takes a two-valued
+constant (+5 / −161); a user who prefers not to state it leaves the column NULL,
+which is a supported path rather than a blocked one.
+
+Added by migration `0002_user_anthropometrics` (nullable columns with no default, so
+the change is metadata-only on Postgres — no table rewrite).
 
 ### 2.2 `meal_log`
 
@@ -198,6 +226,13 @@ class HealthGoal(str, enum.Enum):
 class MealType(str, enum.Enum):
     breakfast = "breakfast"; lunch = "lunch"; dinner = "dinner"; snack = "snack"
 
+class Sex(str, enum.Enum):
+    female = "female"; male = "male"
+
+class ActivityLevel(str, enum.Enum):
+    sedentary = "sedentary"; light = "light"; moderate = "moderate"
+    active = "active"; very_active = "very_active"
+
 class User(Base):
     __tablename__ = "user"
     user_id: Mapped[int] = mapped_column(primary_key=True)
@@ -207,6 +242,13 @@ class User(Base):
     health_goal: Mapped[HealthGoal] = mapped_column(Enum(HealthGoal, name="health_goal_enum"))
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     account_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Optional body metrics (M7) — all nullable; see §2.1
+    height_cm: Mapped[float | None] = mapped_column(Numeric(4, 1))
+    weight_kg: Mapped[float | None] = mapped_column(Numeric(5, 1))
+    birth_year: Mapped[int | None] = mapped_column(SmallInteger)
+    sex: Mapped[Sex | None] = mapped_column(Enum(Sex, name="sex_enum"))
+    activity_level: Mapped[ActivityLevel | None] = mapped_column(
+        Enum(ActivityLevel, name="activity_level_enum"))
     failed_login_count: Mapped[int] = mapped_column(SmallInteger, default=0)
     meals: Mapped[list["MealLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     recommendations: Mapped[list["Recommendation"]] = relationship(cascade="all, delete-orphan")

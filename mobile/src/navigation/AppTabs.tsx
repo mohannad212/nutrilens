@@ -1,19 +1,14 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 
 import { theme } from '@/theme';
-import Capture from '@/screens/Capture';
+import CaptureStack from './CaptureStack';
 import History from '@/screens/History';
 import Home from '@/screens/Home';
 import Insights from '@/screens/Insights';
 import Profile from '@/screens/Profile';
+import type { AppTabsParamList } from './types';
 
-export type AppTabsParamList = {
-  Home: undefined;
-  History: undefined;
-  Capture: undefined;
-  Insights: undefined;
-  Profile: undefined;
-};
+export type { AppTabsParamList };
 
 const Tab = createBottomTabNavigator<AppTabsParamList>();
 
@@ -29,7 +24,8 @@ export default function AppTabs() {
     >
       <Tab.Screen name="Home" component={Home} />
       <Tab.Screen name="History" component={History} />
-      <Tab.Screen name="Capture" component={Capture} />
+      {/* The capture tab hosts the whole flow (07 §1), not a single screen. */}
+      <Tab.Screen name="Capture" component={CaptureStack} />
       <Tab.Screen name="Insights" component={Insights} />
       <Tab.Screen name="Profile" component={Profile} />
     </Tab.Navigator>

@@ -94,9 +94,26 @@ is reflected on next recommendation refresh.
 
 - `[BE]` `recommender.py` + `recommendation_service` (`06`); `GET /recommendations`,
   `POST /recommendations/refresh`, `PATCH /recommendations/{id}/read`; auto-trigger from `POST /meals`.
+- `[BE]` Migration `0002`: five **nullable** body metrics on `user` for the Mifflin-St Jeor energy
+  estimate the calorie insight needs (`02 §2.1`). Accepted optionally at registration.
 - `[APP]` Insights screen: locked-state progress (<7), unlocked insight cards + **disclaimer**.
 - `[BE][11]` Tests: locked <7; synthetic protein-poor profile → protein focus; disclaimer always present;
   no blocked/harmful phrasing.
+
+> **Built out of order.** M7's backend was implemented before M5/M6. This is safe because the engine
+> only *reads* `meal_log` / `meal_item` / `food_item`, all of which exist since M1 — the service
+> tests seed those rows directly through the ORM. Two integration points are therefore deferred
+> rather than skipped:
+> - **The auto-trigger.** `recommendation_service.on_meal_logged(user, db)` is built and tested;
+>   M5's `POST /meals` needs to add the single call after its commit. It never raises, so a refresh
+>   failure cannot fail the meal log.
+> - **`PATCH /users/me/metrics`** (`03 §3`) so the body metrics can be edited after registration —
+>   one extra endpoint for M6's Profile screen. Without it the metrics are register-only, and the
+>   calorie insight's "add your ..." prompt has nowhere to send the user.
+>
+> M5 should also **reject or ignore a client-supplied future `logged_at`**: the engine already
+> filters future timestamps out of the window, but bad data is cheaper to refuse at the write than
+> to filter on every read.
 
 **DoD:** a user with ≥7 confirmed meals sees ≤5 relevant insights aligned to their goal, each with the
 disclaimer; users with <7 see an accurate progress message.

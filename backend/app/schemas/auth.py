@@ -85,14 +85,54 @@ COMMON STUDENT MISTAKES
   "why does my email field accept garbage" debugging session.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.db.models import HealthGoal
+from app.db.models import ActivityLevel, HealthGoal, Sex
+
+# Plausibility bounds for the optional body metrics. These are sanity filters,
+# not medical judgements: they exist to catch unit mix-ups (height entered in
+# metres, weight in pounds) and typos before a nonsense TDEE reaches an insight.
+MIN_HEIGHT_CM = 100.0
+MAX_HEIGHT_CM = 250.0
+MIN_WEIGHT_KG = 25.0
+MAX_WEIGHT_KG = 300.0
+MIN_AGE_YEARS = 13
+MAX_AGE_YEARS = 120
 
 
-class RegisterRequest(BaseModel):
+class AnthropometricsMixin(BaseModel):
+    """
+    Optional body metrics (M7 / FR12) shared by registration and profile updates.
+
+    Every field is optional. They feed the Mifflin-St Jeor maintenance-energy
+    estimate that the calorie insight in `06 §2` compares the user's 7-day
+    average against; supply none and the engine simply reports the average
+    descriptively instead of judging it. Nothing else in the app requires them.
+    """
+
+    height_cm: float | None = Field(default=None, ge=MIN_HEIGHT_CM, le=MAX_HEIGHT_CM)
+    weight_kg: float | None = Field(default=None, ge=MIN_WEIGHT_KG, le=MAX_WEIGHT_KG)
+    birth_year: int | None = None
+    sex: Sex | None = None
+    activity_level: ActivityLevel | None = None
+
+    @field_validator("birth_year")
+    @classmethod
+    def birth_year_implies_plausible_age(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        age = datetime.now(UTC).year - value
+        if not (MIN_AGE_YEARS <= age <= MAX_AGE_YEARS):
+            raise ValueError(
+                f"birth_year must correspond to an age between "
+                f"{MIN_AGE_YEARS} and {MAX_AGE_YEARS}"
+            )
+        return value
+
+
+class RegisterRequest(AnthropometricsMixin):
     """FR01 — what a new user must supply to create an account."""
 
     email: EmailStr
