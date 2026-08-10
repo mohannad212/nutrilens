@@ -379,6 +379,7 @@ EXPECTED_KEYS = {
 EXPECTED_ITEM_KEYS = {
     "item_id",
     "food_name",
+    "display_name",
     "calories_est",
     "protein_est_g",
     "carbs_est_g",

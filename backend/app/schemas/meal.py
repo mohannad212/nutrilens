@@ -110,6 +110,26 @@ class MealCreateRequest(BaseModel):
     items: list[MealItemIn] = Field(min_length=1, max_length=MAX_ITEMS_PER_MEAL)
 
 
+def display_name_for(food101_class: str | None, food_name: str) -> str:
+    """The short human label for a logged item.
+
+    `food_name` is the USDA description, which is written for a nutrient database
+    rather than a person: "Potatoes, frozen, french fried, par fried, extruded,
+    unprepared". Correct, and the right thing to keep as provenance — but it
+    cannot be read at a glance in a history row, and truncating it is worse than
+    useless ("OLIVE GARDEN, spaghetti with meat sauce" cut at the first comma
+    becomes "OLIVE GARDEN").
+
+    The Food-101 class is the label the user actually chose on the results
+    screen, so it is what they expect to see again. Falls back to the USDA name
+    for rows whose class was never recorded (`food101_class` is nullable — see
+    the seeding note in `nutrition_cache`).
+    """
+    if not food101_class:
+        return food_name
+    return food101_class.replace("_", " ").title()
+
+
 class MealItemOut(BaseModel):
     """One persisted `meal_item`, as `03 §6` returns it."""
 
@@ -117,6 +137,9 @@ class MealItemOut(BaseModel):
 
     item_id: int
     food_name: str
+    #: Short label derived from the Food-101 class; `food_name` stays the USDA
+    #: description so provenance is never lost.
+    display_name: str
     calories_est: float
     protein_est_g: float
     carbs_est_g: float
@@ -146,6 +169,7 @@ class MealSummary(BaseModel):
             MealItemOut(
                 item_id=item.item_id,
                 food_name=item.food.food_name,
+                display_name=display_name_for(item.food.food101_class, item.food.food_name),
                 calories_est=float(item.calories_est or 0),
                 protein_est_g=float(item.protein_est_g or 0),
                 carbs_est_g=float(item.carbs_est_g or 0),
@@ -217,6 +241,7 @@ class MealCreateResponse(BaseModel):
                 MealItemOut(
                     item_id=item.item_id,
                     food_name=item.food.food_name,
+                    display_name=display_name_for(item.food.food101_class, item.food.food_name),
                     calories_est=float(item.calories_est or 0),
                     protein_est_g=float(item.protein_est_g or 0),
                     carbs_est_g=float(item.carbs_est_g or 0),

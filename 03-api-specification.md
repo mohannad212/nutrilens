@@ -236,11 +236,20 @@ and the meal `total_calories`, sets `user_confirmed = TRUE`.
 Response `201`:
 ```json
 { "log_id": 87, "logged_at": "2026-07-03T14:25:00Z", "meal_type": "lunch",
-  "total_calories": 433, "items": [ { "item_id": 140, "food_name": "…", "calories_est": 433,
+  "total_calories": 433, "items": [ { "item_id": 140,
+  "food_name": "Fish, salmon, Atlantic, cooked, dry heat", "display_name": "Grilled Salmon",
+  "calories_est": 433,
   "protein_est_g": 46.4, "carbs_est_g": 0.0, "fat_est_g": 26.0, "portion_confirmed_g": 210.0 } ],
   "meals_logged_total": 8, "recommendations_unlocked": true }
 ```
 `recommendations_unlocked` = (`meals_logged_total ≥ MIN_MEALS_FOR_RECOMMENDATION`).
+
+Each item carries **two** names, and they are not interchangeable. `food_name` is the
+USDA description — the provenance of the numbers, and what a reviewer needs to verify
+them. `display_name` is derived from the item's Food-101 class ("Grilled Salmon"): the
+label the user selected on the results screen, and the only one short enough for a
+history row. Clients render `display_name` and keep `food_name` for detail views.
+It falls back to `food_name` when the row has no `food101_class` recorded.
 
 ### GET `/meals` — FR11
 Chronological history (newest first), paginated. **Auth.** Only `user_confirmed = TRUE`.

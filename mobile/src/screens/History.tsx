@@ -59,8 +59,20 @@ export default function History() {
         renderItem={({ item }) => (
           <View style={styles.row}>
             <View style={styles.rowMain}>
-              <Text style={styles.mealType}>{item.meal_type}</Text>
-              <Text style={styles.mealDate}>{formatDate(item.logged_at)}</Text>
+              {/*
+                What was eaten leads; the meal type is context. Showing only
+                `meal_type` made every row read "Snack" or "Dinner", which is the
+                one thing the user already knows and never what they came to look
+                up. `items` is already in the list response — no extra request.
+              */}
+              <Text style={styles.mealFoods} numberOfLines={1}>
+                {item.items.length > 0
+                  ? item.items.map((i) => i.display_name).join(', ')
+                  : item.meal_type}
+              </Text>
+              <Text style={styles.mealDate}>
+                {item.meal_type} · {formatDate(item.logged_at)}
+              </Text>
             </View>
             <View style={styles.rowEnd}>
               <Text style={styles.mealCalories}>{Math.round(item.total_calories)} kcal</Text>
@@ -77,7 +89,10 @@ export default function History() {
         )}
         ListEmptyComponent={<Text style={styles.empty}>No meals logged yet.</Text>}
         ListFooterComponent={
-          meals.length > 0 ? (
+          // Only when paging is actually possible. Two permanently greyed-out
+          // buttons under a single meal read as broken controls, not as an
+          // accurate statement that there is nothing to page to.
+          canGoBack || canLoadMore ? (
             <View style={styles.pager}>
               <Pressable
                 disabled={!canGoBack}
@@ -117,10 +132,19 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: theme.color.border,
   },
-  rowMain: {},
-  mealType: { color: theme.color.textPrimary, fontSize: 15, textTransform: 'capitalize' },
-  mealDate: { color: theme.color.textSecondary, fontSize: 12, marginTop: 2 },
-  rowEnd: { alignItems: 'flex-end', gap: theme.space(1) },
+  // USDA descriptions run long ("Potatoes, frozen, french fried, par fried,
+  // extruded, unprepared"). Without `flex: 1` the text sizes to its content and
+  // pushes the calories and Delete button off the right edge.
+  rowMain: { flex: 1, marginRight: theme.space(3) },
+  mealFoods: { color: theme.color.textPrimary, fontSize: 15 },
+  // Capitalised because the meal type now leads this line ("Snack · 10 Aug").
+  mealDate: {
+    color: theme.color.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
+    textTransform: 'capitalize',
+  },
+  rowEnd: { alignItems: 'flex-end', gap: theme.space(1), flexShrink: 0 },
   mealCalories: { color: theme.color.textSecondary, fontSize: 14 },
   deleteButton: { paddingVertical: 2 },
   deleteText: { color: theme.color.danger, fontSize: 12 },
