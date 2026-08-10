@@ -1,6 +1,6 @@
 import type { AxiosError } from 'axios';
 
-import type { RecognitionResponse } from '@/types/recognition';
+import type { RecognitionResponse } from '@/types/api';
 import { api } from './client';
 import { type ApiErrorEnvelope, normaliseError } from './errors';
 
