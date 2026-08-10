@@ -118,6 +118,26 @@ class Settings(BaseSettings):
     classifier_weights: str = "food101_efficientnet_b4.pth"
     classifier_labels: str = "labels_food101.json"
     confidence_threshold: float = 0.60
+    # Below this, the photo is treated as *not food at all* rather than as an
+    # uncertain food. Food-101 is a closed set of 101 food classes with no
+    # "not food" class, so softmax always names some food however unrelated the
+    # subject — a laptop still comes back as "apple pie". A diffuse distribution
+    # is the only signal available that the subject is out of distribution.
+    # Kept well under `confidence_threshold` so a genuinely hard *food* photo
+    # still reaches the FR04 pick-list instead of being refused outright.
+    no_food_confidence_floor: float = 0.25
+
+    # ---- Open-set food gate (see app/ml/food_gate.py) ----
+    # The floor above is a backstop, not a solution: a laptop photographed close
+    # up scored 0.46 on "apple pie", so no threshold on a closed-set score can
+    # separate "not food" from "unsure which food". The gate asks a general
+    # ImageNet model instead, which has actually seen laptops. Measured mass on
+    # food-or-dining classes: laptop 0.0001, random noise 0.0074 — the default
+    # sits far above both while staying permissive enough never to refuse a real
+    # meal, which is the costlier mistake. Off => classification only, as before.
+    food_gate_enabled: bool = True
+    food_gate_min_prob: float = 0.05
+
     device: str = "cpu"
 
     # ---- Upload / image validation (FR03, used by M3) ----

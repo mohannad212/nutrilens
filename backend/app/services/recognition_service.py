@@ -26,15 +26,20 @@ HOW IT WORKS INTERNALLY
      decoded in-memory RGB image — or raises the specific 4xx.
   2. `classifier.predict(image, top_k=3)` returns the top-3 `(class, confidence)`
      pairs, highest first.
-  3. The top-1 becomes the single `items[0]` (rank 1). If a portion estimator is
+  3. Out-of-distribution gate: if even the top-1 falls below
+     `settings.no_food_confidence_floor` (default 0.25), raise
+     `NoFoodDetectedError` (400). Food-101 has no "not food" class, so the model
+     always names *some* food; a near-uniform distribution is the only available
+     evidence that the subject is not a meal.
+  4. The top-1 becomes the single `items[0]` (rank 1). If a portion estimator is
      wired and `settings.portion_enabled`, the M4 pipeline (`05`) estimates its
      mass range and attaches a `portion` object; otherwise `portion` is null and
      the classification half is unaffected.
-  4. FR04 rule: if the top-1 confidence is below `settings.confidence_threshold`
+  5. FR04 rule: if the top-1 confidence is below `settings.confidence_threshold`
      (default 0.60), set `low_confidence = True` and fill `alternatives` with the
      top-3 candidates for the user to choose from; otherwise `alternatives` is
      empty.
-  5. A fresh `request_id` (uuid4 hex) is attached for log correlation.
+  6. A fresh `request_id` (uuid4 hex) is attached for log correlation.
 The image exists only as bytes -> PIL -> tensor in memory and is never written
 to disk (M3 DoD).
 
@@ -56,6 +61,24 @@ A: The contract always returns a best guess in `items`; `low_confidence` +
    `alternatives` tell the app to *also* offer a pick-list. The app decides
    whether to auto-select the top-1 or ask the user (`07`).
 
+Q: "How does the app know a photo isn't food at all? Food-101 has no such class."
+A: It infers it from the *shape* of the output. A closed-set softmax over 101
+   food classes must assign its mass to some food, so an unrelated subject (a
+   laptop, a face) produces a diffuse distribution — top-1 around 0.1-0.2 rather
+   than the 0.6-0.95 a real dish scores. `no_food_confidence_floor` turns that
+   into a rejection. It is a heuristic, not a true open-set method: the rigorous
+   alternatives are an explicit background class trained on non-food images, or
+   an OOD detector (ODIN / energy-based scoring). Both need data or training
+   changes beyond this build, and are the honest answer to "how would you improve
+   it?".
+
+Q: "Why not just raise `confidence_threshold` instead of adding a second one?"
+A: They answer different questions. `confidence_threshold` (0.60) asks "am I sure
+   *which* food this is?" and its failure mode is a pick-list. The floor asks "is
+   this food at all?" and its failure mode is a retake. Collapsing them would
+   force one response to two different problems: raise 0.60 and hard food photos
+   get refused; lower the floor toward it and non-food gets a pick-list of foods.
+
 Q: "Where does display_name come from?"
 A: Derived from the Food-101 class string here (`grilled_salmon` ->
    'Grilled Salmon') so the client never has to prettify snake_case.
@@ -76,7 +99,9 @@ import uuid
 from PIL import Image
 
 from app.config import settings
+from app.core.errors import NoFoodDetectedError
 from app.ml.classifier import FoodClassifier
+from app.ml.food_gate import FoodGate
 from app.ml.portion import PortionEstimator, describe_scale_source
 from app.ml.preprocess import validate_and_load_image
 from app.schemas.recognition import Alternative, Portion, Prediction, RecognitionResponse
@@ -121,6 +146,7 @@ def recognise(
     content_type: str | None,
     classifier: FoodClassifier,
     portion_estimator: PortionEstimator | None = None,
+    food_gate: FoodGate | None = None,
 ) -> RecognitionResponse:
     """Validate an uploaded image, classify it, estimate the portion, apply FR04.
 
@@ -129,9 +155,35 @@ def recognise(
     error envelope. The image (and any mask) is processed entirely in memory.
     """
     image = validate_and_load_image(raw, content_type)
+
+    # Open-set gate, ahead of the specialist: Food-101 has no "not food" class,
+    # so this is the only stage that can answer "is this a meal at all?". Skipped
+    # when the gate isn't loaded (fail open — see `deps.get_food_gate`).
+    if food_gate is not None:
+        verdict = food_gate.inspect(image)
+        if verdict.food_probability < settings.food_gate_min_prob:
+            raise NoFoodDetectedError(
+                details={
+                    "food_probability": verdict.food_probability,
+                    "threshold": settings.food_gate_min_prob,
+                    "looks_like": verdict.top_label,
+                }
+            )
+
     predictions = classifier.predict(image, top_k=_TOP_K)  # [(class, conf), ...]
 
     top_class, top_conf = predictions[0]
+
+    # Backstop for anything the gate let through: a distribution this flat means
+    # the specialist has no real opinion either. Checked before portion
+    # estimation — no point measuring the mass of something we don't call food.
+    if top_conf < settings.no_food_confidence_floor:
+        raise NoFoodDetectedError(
+            details={
+                "top_confidence": round(top_conf, 4),
+                "floor": settings.no_food_confidence_floor,
+            }
+        )
     items = [
         Prediction(
             rank=1,

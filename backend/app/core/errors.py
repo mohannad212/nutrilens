@@ -176,6 +176,20 @@ class ImageTooBlurryError(AppError):
     message = "Image is too blurry to recognise. Hold steady and retake."
 
 
+class NoFoodDetectedError(AppError):
+    """The classifier's output is too diffuse for the subject to be food.
+
+    Sits alongside the quality-gate rejections above rather than with the 500s
+    on purpose: nothing failed. The request was valid and the model ran fine —
+    the photo simply isn't of a food, and the only useful answer is "retake it",
+    exactly as with a blurry or badly-lit shot.
+    """
+
+    status_code = 400
+    code = "NO_FOOD_DETECTED"
+    message = "No food detected in this photo. Point the camera at a meal and retake."
+
+
 class InferenceFailedError(AppError):
     status_code = 500
     code = "INFERENCE_FAILED"

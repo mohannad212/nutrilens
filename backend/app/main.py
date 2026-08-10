@@ -84,6 +84,7 @@ from app.core.errors import (
 from app.core.rate_limit import HourlyRateLimiter
 from app.integrations.usda_client import UsdaClient
 from app.ml.classifier import load_classifier
+from app.ml.food_gate import load_food_gate
 from app.ml.portion import PortionEstimator
 from app.ml.portion.container_model import load_container_model
 from app.ml.portion.reference_detector import load_coco_reference_detector
@@ -113,6 +114,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # missing/corrupt weights — degrade, don't crash the API
         app.state.classifier = None
         logger.warning("Recognition model NOT loaded (%s); /recognise will 500", weights)
+
+    # Open-set food gate. Loaded like the classifier and degraded the same way:
+    # if the ImageNet weights are unavailable the gate is simply absent and
+    # /recognise behaves exactly as it did before it existed (fail open), because
+    # refusing every photo would be a far worse failure than admitting a non-meal.
+    if settings.food_gate_enabled:
+        try:
+            app.state.food_gate = load_food_gate(settings.device)
+            logger.info("Food gate loaded (min_prob=%.3f)", settings.food_gate_min_prob)
+        except Exception:
+            app.state.food_gate = None
+            logger.warning("Food gate NOT loaded; /recognise will skip the non-food check")
+    else:
+        app.state.food_gate = None
 
     # M4 portion estimator (05). The trained aux models (container classifier,
     # reference detector, segmenter) arrive from the offline ML track on their own

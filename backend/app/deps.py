@@ -101,6 +101,7 @@ from app.db.base import SessionLocal
 from app.db.models import User
 from app.integrations.usda_client import UsdaClient
 from app.ml.classifier import FoodClassifier
+from app.ml.food_gate import FoodGate
 from app.ml.portion import PortionEstimator
 from app.security import decode_access_token
 
@@ -180,6 +181,17 @@ def get_usda_client(request: Request) -> UsdaClient:
         )
         request.app.state.usda_client = client
     return client
+
+
+def get_food_gate(request: Request) -> FoodGate | None:
+    """Hand the request the open-set `FoodGate`, or None if it isn't loaded.
+
+    None is a supported state, not an error: the gate is a guard in front of
+    recognition, so an absent one means "don't guard", never "fail". Refusing
+    every upload because an auxiliary model is missing would be a worse outcome
+    than the non-food guesses the gate exists to prevent.
+    """
+    return getattr(request.app.state, "food_gate", None)
 
 
 def get_portion_estimator(request: Request) -> PortionEstimator | None:
