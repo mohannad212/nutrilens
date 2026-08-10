@@ -174,3 +174,19 @@ export interface MealCreateResponse {
 export interface CookingMethodsResponse {
   cooking_methods: CookingMethod[];
 }
+/** `03 §11` — GET /meals list response, one row per logged meal today. */
+export interface MealSummary {
+  log_id: number;
+  logged_at: string;
+  meal_type: MealType;
+  total_calories: number;
+  item_count: number;
+  items: MealItemOut[];
+}
+
+export interface MealsListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  meals: MealSummary[];
+}

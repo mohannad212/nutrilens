@@ -39,3 +39,15 @@ export async function getCookingMethods(): Promise<CookingMethodsResponse> {
   const { data } = await api.get<CookingMethodsResponse>('/meta/cooking-methods');
   return data;
 }
+import type { MealsListResponse } from '@/types/api';
+
+/** `03 §11` — today's (or any range's) logged meals, newest first. */
+export async function getMeals(params?: {
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MealsListResponse> {
+  const { data } = await api.get<MealsListResponse>('/meals', { params });
+  return data;
+}
