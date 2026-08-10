@@ -51,3 +51,7 @@ export async function getMeals(params?: {
   const { data } = await api.get<MealsListResponse>('/meals', { params });
   return data;
 }
+/** `03 §11` — remove a logged meal. Returns nothing on success (204). */
+export async function deleteMeal(logId: number): Promise<void> {
+  await api.delete(`/meals/${logId}`);
+}
