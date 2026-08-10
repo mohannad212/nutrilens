@@ -62,6 +62,19 @@ from app.services import recommendation_service as svc
 NOW = datetime(2026, 7, 30, 12, 0, 0)
 
 
+def real_now() -> datetime:
+    """The clock the *service* uses when no `now` seam is injected.
+
+    Most tests pin `now=NOW` on both sides, so a frozen timestamp is fine. The
+    two that deliberately exercise the production path — where `now` is not
+    passed and `_now()` reads the wall clock — must seed relative to this
+    instead, or their meals fall outside the rolling window as soon as real time
+    moves more than `recommendation_window_days` past `NOW`. They did: the suite
+    passed until 2026-08-06 and failed afterwards for no reason but the date.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
 def make_user(
     db,
     *,
@@ -115,6 +128,7 @@ def seed_meals(
     confirmed=True,
     days_ago_start=0.0,
     day_step=1.0,
+    base: datetime | None = None,
 ) -> list[MealLog]:
     """
     Write `count` real confirmed meals, one per day walking backwards from
@@ -127,7 +141,7 @@ def seed_meals(
     for index in range(count):
         log = MealLog(
             user_id=user.user_id,
-            logged_at=NOW - timedelta(days=days_ago_start + index * day_step),
+            logged_at=(base or NOW) - timedelta(days=days_ago_start + index * day_step),
             meal_type=MealType.lunch,
             total_calories=calories,
             user_confirmed=confirmed,
@@ -577,10 +591,13 @@ def test_on_meal_logged_returns_none_while_locked(db_session):
 def test_on_meal_logged_generates_when_the_threshold_is_crossed(db_session):
     """The meal that takes the user from 6 to 7 must trigger the first batch."""
     user = make_user(db_session)
-    seed_meals(db_session, user, count=6, day_step=0.5)
+    # `on_meal_logged` is called here without a `now` seam, so both the seeded
+    # meals and the service's window must be anchored to the same wall clock.
+    base = real_now()
+    seed_meals(db_session, user, count=6, day_step=0.5, base=base)
     assert svc.on_meal_logged(user, db_session) is None
 
-    seed_meals(db_session, user, count=1, days_ago_start=0.1, day_step=0.0)
+    seed_meals(db_session, user, count=1, days_ago_start=0.1, day_step=0.0, base=base)
     result = svc.on_meal_logged(user, db_session)
 
     assert result is not None
@@ -638,7 +655,8 @@ def test_on_meal_logged_leaves_the_session_usable_after_a_failure(db_session, mo
 def test_now_defaults_to_the_real_clock(db_session):
     """The `now` parameter is a test seam; production passes nothing."""
     user = make_user(db_session)
-    seed_meals(db_session, user, count=7, days_ago_start=0.0, day_step=0.2)
+    # Seeded against the wall clock, because that is what the service reads here.
+    seed_meals(db_session, user, count=7, days_ago_start=0.0, day_step=0.2, base=real_now())
 
     result = svc.get_recommendations(user, db_session)
 
