@@ -21,7 +21,12 @@ export default function Login({ navigation }: Props) {
 
   function validate(): boolean {
     const errors: typeof fieldErrors = {};
+    // `03 §2` authenticates on email, not username, and typing the username is
+    // the natural mistake — say so here rather than round-tripping to the
+    // server's "an email address must have an @-sign", which describes the
+    // parser's complaint instead of the user's actual error.
     if (!email.trim()) errors.email = 'Email is required.';
+    else if (!email.includes('@')) errors.email = 'Use your email address, not your username.';
     if (!password) errors.password = 'Password is required.';
     setFieldErrors(errors);
     return Object.keys(errors).length === 0;

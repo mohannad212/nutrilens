@@ -37,7 +37,11 @@ export default function Register({ navigation }: Props) {
     const errors: typeof fieldErrors = {};
     if (!email.trim()) errors.email = 'Email is required.';
     if (!username.trim()) errors.username = 'Username is required.';
+    // Mirrors the backend's own rule (schemas/auth.py password_has_letter_and_digit)
+    // so an invalid password is caught here rather than coming back as a 422.
     if (password.length < 8) errors.password = 'Password must be at least 8 characters.';
+    else if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password))
+      errors.password = 'Password must contain at least one letter and one digit.';
     setFieldErrors(errors);
     return Object.keys(errors).length === 0;
   }

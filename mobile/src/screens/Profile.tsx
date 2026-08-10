@@ -24,6 +24,15 @@ export default function Profile() {
   const [height, setHeight] = useState('');
   const [weight, setWeight] = useState('');
   const [birthYear, setBirthYear] = useState('');
+  // A successful PATCH changes nothing on screen (the fields already show what
+  // was sent), so without this the save is indistinguishable from a dead button.
+  const [justSaved, setJustSaved] = useState(false);
+
+  /** Editing invalidates the previous "Saved" acknowledgement. */
+  const edit = (setter: (value: string) => void) => (value: string) => {
+    setter(value);
+    setJustSaved(false);
+  };
 
   // Populate the form once the profile loads (not on every refetch, so the
   // user's in-progress edits aren't overwritten by a background refresh).
@@ -56,11 +65,14 @@ export default function Profile() {
   const profile = profileQuery.data;
 
   const handleSaveMetrics = () => {
-    updateMetrics.mutate({
-      height_cm: height.trim() ? Number(height) : null,
-      weight_kg: weight.trim() ? Number(weight) : null,
-      birth_year: birthYear.trim() ? Number(birthYear) : null,
-    });
+    updateMetrics.mutate(
+      {
+        height_cm: height.trim() ? Number(height) : null,
+        weight_kg: weight.trim() ? Number(weight) : null,
+        birth_year: birthYear.trim() ? Number(birthYear) : null,
+      },
+      { onSuccess: () => setJustSaved(true) },
+    );
   };
 
   return (
@@ -96,23 +108,28 @@ export default function Profile() {
         <TextField
           label="Height (cm)"
           value={height}
-          onChangeText={setHeight}
+          onChangeText={edit(setHeight)}
           keyboardType="numeric"
         />
         <TextField
           label="Weight (kg)"
           value={weight}
-          onChangeText={setWeight}
+          onChangeText={edit(setWeight)}
           keyboardType="numeric"
         />
         <TextField
           label="Birth year"
           value={birthYear}
-          onChangeText={setBirthYear}
+          onChangeText={edit(setBirthYear)}
           keyboardType="numeric"
         />
         {updateMetrics.isError ? (
           <Text style={styles.error}>{messageForError(updateMetrics.error)}</Text>
+        ) : null}
+        {justSaved && !updateMetrics.isPending ? (
+          <Text style={styles.success} accessibilityLiveRegion="polite">
+            Metrics saved.
+          </Text>
         ) : null}
         <PrimaryButton
           label="Save metrics"
@@ -152,5 +169,6 @@ const styles = StyleSheet.create({
   goalText: { color: theme.color.textSecondary, fontSize: 13 },
   goalTextSelected: { color: theme.color.textPrimary, fontWeight: '500' },
   error: { color: theme.color.danger, fontSize: 13, marginBottom: theme.space(3) },
+  success: { color: theme.color.accent, fontSize: 13, marginBottom: theme.space(3) },
   logoutRow: { marginTop: theme.space(8) },
 });
