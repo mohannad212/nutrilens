@@ -3,17 +3,26 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useMemo, useState } from 'react';
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import FoodClassPicker from '@/components/FoodClassPicker';
 import PredictionCard from '@/components/PredictionCard';
 import PrimaryButton from '@/components/PrimaryButton';
 import { Screen } from '@/components/states';
+import { useFoodClasses } from '@/hooks/useFoodClasses';
 import type { CaptureStackParamList } from '@/navigation/types';
 import { theme } from '@/theme';
-import type { MealType } from '@/types/api';
+import type { FoodClass, MealType } from '@/types/api';
 
 type ResultsRoute = RouteProp<CaptureStackParamList, 'RecognitionResults'>;
 type Navigation = NativeStackNavigationProp<CaptureStackParamList, 'RecognitionResults'>;
 
 const PORTION_STEP_G = 10;
+
+const MEAL_TYPES: { value: MealType; label: string }[] = [
+  { value: 'breakfast', label: 'Breakfast' },
+  { value: 'lunch', label: 'Lunch' },
+  { value: 'dinner', label: 'Dinner' },
+  { value: 'snack', label: 'Snack' },
+];
 
 /** Simple time-of-day default — the user can still be wrong, this just saves a tap. */
 function inferMealType(): MealType {
@@ -31,14 +40,45 @@ export default function RecognitionResults() {
 
   const top = result.items[0];
   const [selectedClass, setSelectedClass] = useState(top.food101_class);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  /**
+   * Set when the user overrules the model from the full 101 list. Held separately
+   * because such a choice has no confidence to report — see `correctedConfidence`.
+   */
+  const [override, setOverride] = useState<FoodClass | null>(null);
+
+  const foodClasses = useFoodClasses();
 
   const selected = useMemo(() => {
+    if (override) {
+      return { ...top, food101_class: override.food101_class, display_name: override.display_name };
+    }
     if (!result.low_confidence) return top;
     const alt = result.alternatives.find((a) => a.food101_class === selectedClass);
     return alt
       ? { ...top, food101_class: alt.food101_class, display_name: alt.display_name, confidence: alt.confidence }
       : top;
-  }, [result, selectedClass, top]);
+  }, [override, result, selectedClass, top]);
+
+  /**
+   * A human correction is not a model score. Sending the classifier's confidence
+   * for a food the user chose would record a number the model never asserted, and
+   * `meal_item.confidence_score` is meant to capture how sure the *model* was.
+   */
+  const correctedConfidence = override ? null : selected.confidence;
+
+  const handleOverride = (choice: FoodClass) => {
+    setOverride(choice);
+    setSelectedClass(choice.food101_class);
+    setPickerOpen(false);
+  };
+
+  /**
+   * `inferMealType()` is a default, not a verdict: it reads the clock, so a late
+   * dinner is filed as a "snack" with no way to say otherwise. The meal type is
+   * the axis M7's insights group by, so a wrong one quietly skews the analysis.
+   */
+  const [mealType, setMealType] = useState<MealType>(inferMealType());
 
   const [portionG, setPortionG] = useState(top.portion?.point_g ?? 100);
   const minG = top.portion?.min_g ?? 50;
@@ -55,8 +95,8 @@ export default function RecognitionResults() {
       portion_confirmed_g: portionG,
       portion_min_g: top.portion?.min_g ?? null,
       portion_max_g: top.portion?.max_g ?? null,
-      confidence_score: selected.confidence,
-      meal_type: inferMealType(),
+      confidence_score: correctedConfidence,
+      meal_type: mealType,
     });
   };
 
@@ -65,7 +105,12 @@ export default function RecognitionResults() {
       <ScrollView contentContainerStyle={styles.content}>
         <Image source={{ uri: imageUri }} style={styles.photo} resizeMode="cover" />
 
-        {result.low_confidence ? (
+        {override ? (
+          <View style={styles.section}>
+            <Text style={styles.title}>You chose</Text>
+            <PredictionCard displayName={override.display_name} selected />
+          </View>
+        ) : result.low_confidence ? (
           <View style={styles.section}>
             <Text style={styles.title}>Not quite sure — pick the closest match</Text>
             {result.alternatives.map((alt) => (
@@ -84,6 +129,21 @@ export default function RecognitionResults() {
             <PredictionCard displayName={top.display_name} confidence={top.confidence} selected />
           </View>
         )}
+
+        {/*
+          Always available, including on a high-confidence result — that is the
+          case `alternatives` cannot cover, and the one where a silent error does
+          the most damage.
+        */}
+        <Pressable
+          onPress={() => setPickerOpen(true)}
+          style={styles.correctLink}
+          accessibilityRole="button"
+        >
+          <Text style={styles.correctLinkText}>
+            {override ? 'Choose a different food' : 'Not the right food? Choose another'}
+          </Text>
+        </Pressable>
 
         <View style={styles.section}>
           <Text style={styles.title}>Estimated portion</Text>
@@ -108,9 +168,43 @@ export default function RecognitionResults() {
           </View>
         </View>
 
+        <View style={styles.section}>
+          <Text style={styles.title}>Meal</Text>
+          <View style={styles.mealTypeRow}>
+            {MEAL_TYPES.map((option) => {
+              const isSelected = option.value === mealType;
+              return (
+                <Pressable
+                  key={option.value}
+                  onPress={() => setMealType(option.value)}
+                  style={[styles.mealChip, isSelected ? styles.mealChipSelected : null]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: isSelected }}
+                >
+                  <Text
+                    style={[styles.mealChipText, isSelected ? styles.mealChipTextSelected : null]}
+                  >
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
         <PrimaryButton label="Confirm" onPress={handleConfirm} />
         <PrimaryButton label="Retake photo" variant="secondary" onPress={() => navigation.replace('Camera')} />
       </ScrollView>
+
+      <FoodClassPicker
+        visible={pickerOpen}
+        classes={foodClasses.data?.food_classes ?? []}
+        selectedClass={selected.food101_class}
+        onSelect={handleOverride}
+        onClose={() => setPickerOpen(false)}
+        isLoading={foodClasses.isPending}
+        error={foodClasses.error}
+      />
     </Screen>
   );
 }
@@ -129,6 +223,23 @@ const styles = StyleSheet.create({
     marginBottom: theme.space(2),
   },
   section: { marginBottom: theme.space(4) },
+  // 44pt minimum touch target (07 §9).
+  correctLink: { minHeight: 44, justifyContent: 'center', marginBottom: theme.space(4) },
+  correctLinkText: { color: theme.color.accent, fontSize: 15, textAlign: 'center' },
+  mealTypeRow: { flexDirection: 'row', gap: theme.space(2) },
+  mealChip: {
+    flex: 1,
+    minHeight: 44, // 07 §9 touch target
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space(2),
+    alignItems: 'center',
+  },
+  mealChipSelected: { borderColor: theme.color.accent, backgroundColor: theme.color.surface },
+  mealChipText: { color: theme.color.textSecondary, fontSize: 13 },
+  mealChipTextSelected: { color: theme.color.textPrimary, fontWeight: '500' },
   title: {
     color: theme.color.textPrimary,
     fontSize: 18,

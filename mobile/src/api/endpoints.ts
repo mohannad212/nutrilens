@@ -16,6 +16,7 @@
 import { api } from './client';
 import type {
   CookingMethodsResponse,
+  FoodClassesResponse,
   MealCreateRequest,
   MealCreateResponse,
   NutritionRequest,
@@ -37,6 +38,12 @@ export async function postMeal(body: MealCreateRequest): Promise<MealCreateRespo
 /** `03 §8` — the cooking-method enum, so the picker cannot drift from the validator. */
 export async function getCookingMethods(): Promise<CookingMethodsResponse> {
   const { data } = await api.get<CookingMethodsResponse>('/meta/cooking-methods');
+  return data;
+}
+
+/** `03 §8` — all 101 classes, for overruling a wrong prediction. */
+export async function getFoodClasses(): Promise<FoodClassesResponse> {
+  const { data } = await api.get<FoodClassesResponse>('/meta/food-classes');
   return data;
 }
 import type { MealsListResponse } from '@/types/api';

@@ -58,6 +58,7 @@ export type ApiErrorCode =
   | 'IMAGE_TOO_SMALL'
   | 'IMAGE_POOR_LIGHTING'
   | 'IMAGE_TOO_BLURRY'
+  | 'NO_FOOD_DETECTED'
   | 'INFERENCE_FAILED'
   | 'USDA_RATE_LIMITED'
   | 'USDA_UNAVAILABLE'
@@ -151,7 +152,10 @@ export interface MealCreateRequest {
 
 export interface MealItemOut {
   item_id: number;
+  /** The USDA description — kept as provenance, too verbose to render. */
   food_name: string;
+  /** Short Food-101 label ("French Fries"); what the user picked and expects. */
+  display_name: string;
   calories_est: number;
   protein_est_g: number;
   carbs_est_g: number;
@@ -173,6 +177,16 @@ export interface MealCreateResponse {
 /** `03 §8` — meta, used to keep the cooking-method picker in sync with the enum. */
 export interface CookingMethodsResponse {
   cooking_methods: CookingMethod[];
+}
+
+/** `03 §8` — every class the model can predict, for the manual-correction list. */
+export interface FoodClass {
+  food101_class: string;
+  display_name: string;
+}
+
+export interface FoodClassesResponse {
+  food_classes: FoodClass[];
 }
 /** `03 §11` — GET /meals list response, one row per logged meal today. */
 export interface MealSummary {

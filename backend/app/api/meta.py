@@ -28,16 +28,25 @@ WHY IT IS PUBLIC
 English words with no user data in it, so requiring a token would buy nothing and
 would stop the app pre-loading the picker on the login screen.
 
-WHY NOT `GET /meta/food-classes` TOO
----------------------------------------
-`03 §8` lists it, and it is genuinely deferred rather than forgotten. It returns
-the 101 labels, which live in `models/labels_food101.json` — an artefact the ML
-track ships through a GitHub Release and which may legitimately be absent
-(`04 §7`; the lifespan in `main.py` already tolerates that). Serving it therefore
-needs a decision about what to return when the file is missing, and the screen
-that consumes it (a manual "wrong prediction, pick the right food" list) is not
-part of M5's flow — `/recognise` already returns the alternatives the user chooses
-between (`03 §4`). It belongs with whichever milestone builds that screen.
+`GET /meta/food-classes`
+---------------------------
+Deferred until the screen that needed it existed, which is now: the results
+screen lets the user overrule a wrong prediction by picking from the full 101.
+`/recognise`'s `alternatives` cannot serve that case — they are only populated
+*below* the confidence threshold, so a prediction that is confidently wrong (a
+plate of pasta returned as "French Fries" at 0.71) offers the user nothing to
+correct it with, and the whole downstream chain inherits the error.
+
+The open question was what to serve when the labels are missing. It resolved
+itself: `labels_food101.json` is **tracked in git** — only the `.pth` weights ship
+through a Release (`backend/models/README.md`). So unlike the classifier, the
+labels are always present in a checkout, and their absence is a broken deployment
+rather than the expected "weights not downloaded yet" state. The endpoint reads
+the file and lets a genuine IO error surface as a 500, instead of inventing a
+degraded mode for a case that cannot occur in a valid install.
+
+It stays public for the same reason as the cooking methods: 101 English food
+names, no user data.
 
 COMMON STUDENT MISTAKES
 --------------------------
@@ -47,8 +56,13 @@ COMMON STUDENT MISTAKES
   after login.
 """
 
+import json
+from functools import lru_cache
+from pathlib import Path
+
 from fastapi import APIRouter
 
+from app.config import settings
 from app.core.enums import COOKING_METHODS
 
 router = APIRouter()
@@ -58,3 +72,34 @@ router = APIRouter()
 def cooking_methods() -> dict[str, list[str]]:
     """`03 §8` / `03 §10` — the cooking-method enum, in contract order."""
     return {"cooking_methods": COOKING_METHODS}
+
+
+def _display_name(food101_class: str) -> str:
+    """`grilled_salmon` -> `Grilled Salmon`, matching `recognition_service`."""
+    return food101_class.replace("_", " ").title()
+
+
+@lru_cache(maxsize=1)
+def _load_food_classes() -> list[dict[str, str]]:
+    """The 101 labels, alphabetical, read once per process.
+
+    Cached because the file never changes while the process lives, and this is a
+    public endpoint — an uncached read would be free disk IO for any caller.
+    """
+    path = Path(settings.model_dir) / settings.classifier_labels
+    raw: dict[str, str] = json.loads(path.read_text())
+    return [
+        {"food101_class": cls, "display_name": _display_name(cls)}
+        for cls in sorted(raw.values())
+    ]
+
+
+@router.get("/meta/food-classes")
+def food_classes() -> dict[str, list[dict[str, str]]]:
+    """`03 §8` — every class the model can predict, for the manual-correction list.
+
+    Sorted alphabetically by class rather than kept in label-index order: the
+    consumer is a human scrolling a list, and the index order is an artefact of
+    how the model was trained.
+    """
+    return {"food_classes": _load_food_classes()}

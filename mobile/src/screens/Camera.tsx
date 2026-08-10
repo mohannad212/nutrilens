@@ -1,4 +1,4 @@
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -7,7 +7,7 @@ import { useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import PrimaryButton from '@/components/PrimaryButton';
-import { Screen } from '@/components/states';
+import { Screen, messageForError } from '@/components/states';
 import { useRecognise } from '@/hooks/useRecognise';
 import type { CaptureStackParamList } from '@/navigation/types';
 import { theme } from '@/theme';
@@ -55,8 +55,14 @@ export default function Camera() {
       const result = await recognise.mutateAsync(manipulated.uri);
       navigation.replace('RecognitionResults', { imageUri: manipulated.uri, result });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Could not process that photo.';
-      Alert.alert('Recognition failed', message);
+      // Map on `code` (07 §7) rather than showing the server's raw wording —
+      // NO_FOOD_DETECTED in particular is a normal outcome, not a failure, so it
+      // gets its own title instead of "Recognition failed".
+      const code = (err as { code?: string })?.code;
+      Alert.alert(
+        code === 'NO_FOOD_DETECTED' ? 'No food detected' : 'Recognition failed',
+        messageForError(err),
+      );
     } finally {
       setIsCapturing(false);
     }

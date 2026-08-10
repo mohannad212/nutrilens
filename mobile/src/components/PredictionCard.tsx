@@ -5,7 +5,12 @@ import ConfidenceChip from './ConfidenceChip';
 
 interface PredictionCardProps {
   displayName: string;
-  confidence: number;
+  /**
+   * Omitted when the user picked the food themselves — there is no model score
+   * to show, and rendering the overruled prediction's number next to their own
+   * choice would attribute a confidence the model never expressed about it.
+   */
+  confidence?: number;
   selected?: boolean;
   onPress?: () => void;
 }
@@ -16,7 +21,7 @@ export default function PredictionCard({ displayName, confidence, selected, onPr
   const content = (
     <View style={[styles.card, selected && styles.cardSelected]}>
       <Text style={styles.name}>{displayName}</Text>
-      <ConfidenceChip confidence={confidence} />
+      {confidence === undefined ? null : <ConfidenceChip confidence={confidence} />}
     </View>
   );
 

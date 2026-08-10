@@ -48,10 +48,32 @@ const ERROR_COPY: Partial<Record<ApiErrorCode, string>> = {
   IMAGE_TOO_LARGE: 'That photo is too large. Take another and we’ll shrink it for you.',
   IMAGE_POOR_LIGHTING: 'That photo is too dark or too bright to read. Retake it with even lighting.',
   IMAGE_TOO_BLURRY: 'That photo is a little blurry. Hold steady and retake it.',
+  NO_FOOD_DETECTED:
+    "We couldn't recognise any food in that photo. Point the camera at a meal and try again.",
 };
 
 export function messageForError(error: unknown): string {
   const code = (error as { code?: ApiErrorCode })?.code;
+
+  // A validation error already names the offending field(s) (`03 §9` details).
+  // Collapsing that to generic copy is the one case where the server knows more
+  // than we do, so surface it rather than the mapped string.
+  if (code === 'VALIDATION_ERROR') {
+    const details = (error as { details?: unknown })?.details;
+    if (Array.isArray(details)) {
+      const lines = details
+        .map((entry) => {
+          const { field, message } = (entry ?? {}) as { field?: string; message?: string };
+          if (!message) return '';
+          // Fields arrive dotted from FastAPI ("body.password") — show the leaf.
+          const leaf = field?.split('.').pop();
+          return leaf ? `${leaf}: ${message}` : message;
+        })
+        .filter(Boolean);
+      if (lines.length > 0) return lines.join('\n');
+    }
+  }
+
   if (code && ERROR_COPY[code]) return ERROR_COPY[code] as string;
 
   const message = (error as { message?: string })?.message;
