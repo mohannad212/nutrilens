@@ -37,18 +37,12 @@ import { useNavigation } from '@react-navigation/native';
 
 import Camera from '@/screens/Camera';
 import NutritionSummary from '@/screens/NutritionSummary';
-import PlaceholderScreen from '@/screens/PlaceholderScreen';
 import { theme } from '@/theme';
 import type { CaptureStackParamList } from './types';
 import RecognitionResults from '@/screens/RecognitionResults';
 
 const Stack = createNativeStackNavigator<CaptureStackParamList>();
 
-// M3/M4 replace this with the real Screen 2 (07 §2).
-/*function RecognitionResults() {
-  return <PlaceholderScreen label="Recognition Results" />;
-}
-*/
 type SummaryProps = NativeStackScreenProps<CaptureStackParamList, 'NutritionSummary'>;
 
 /** Adapter: route params in, navigation side effects out. See the header note. */

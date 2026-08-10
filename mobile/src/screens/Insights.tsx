@@ -32,7 +32,7 @@ export default function Insights() {
     return (
       <Screen>
         <View style={styles.locked}>
-          <Text style={styles.lockedTitle}>Insights aren't ready yet</Text>
+          <Text style={styles.lockedTitle}>Insights aren&apos;t ready yet</Text>
           <Text style={styles.lockedBody}>{data.message}</Text>
           <View style={styles.progressTrack}>
             <View
