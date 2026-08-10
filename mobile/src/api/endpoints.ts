@@ -74,3 +74,10 @@ export async function updateMetrics(body: UpdateMetricsRequest): Promise<UserPro
   const { data } = await api.patch<UserProfile>('/users/me/metrics', body);
   return data;
 }
+import type { RecommendationsResponse } from '@/types/api';
+
+/** `03 §7` — FR12 personalised insights, locked until enough meals are logged. */
+export async function getRecommendations(): Promise<RecommendationsResponse> {
+  const { data } = await api.get<RecommendationsResponse>('/recommendations');
+  return data;
+}

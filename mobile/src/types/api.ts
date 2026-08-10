@@ -224,3 +224,20 @@ export interface UpdateMetricsRequest {
   sex?: Sex | null;
   activity_level?: ActivityLevel | null;
 }
+/** `03 §7` — FR12: unlocks after `MIN_MEALS_FOR_RECOMMENDATION` logged meals. */
+export interface Insight {
+  rec_id: number;
+  insight_text: string;
+  nutrient_focus: string;
+  was_read: boolean;
+}
+
+export interface RecommendationsResponse {
+  unlocked: boolean;
+  insights: Insight[];
+  generated_at: string;
+  meals_logged: number;
+  meals_required: number;
+  message: string;
+  disclaimer: string;
+}
