@@ -18,8 +18,7 @@ import type { RecognitionResponse } from '@/types/api';
 /** `07 §1` — the capture flow: Camera -> RecognitionResults -> NutritionSummary. */
 export type CaptureStackParamList = {
   Camera: undefined;
-  /** M3/M4 populate this from the `/recognise` response. */
-  RecognitionResults: { recognition: RecognitionResponse } | undefined;
+  RecognitionResults: { imageUri: string; result: RecognitionResponse };
   NutritionSummary: NutritionSummaryParams;
 };
 

@@ -1,4 +1,4 @@
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -7,21 +7,20 @@ import { useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import PrimaryButton from '@/components/PrimaryButton';
-import Screen from '@/components/Screen';
+import { Screen } from '@/components/states';
 import { useRecognise } from '@/hooks/useRecognise';
-import type { AppStackParamList } from '@/navigation/AppStack';
+import type { CaptureStackParamList } from '@/navigation/types';
 import { theme } from '@/theme';
 
-// Screen 5 (07-mobile-app.md §2): take/upload a photo, then straight to
-// Recognition Results. Mirrors the server's FR03 constraints client-side
-// (§6) so a bad photo is rejected here instead of round-tripping to the API.
 const MIN_WIDTH = 640;
 const MIN_HEIGHT = 480;
 const MAX_LONG_EDGE = 1600;
 const JPEG_QUALITY = 0.8;
 
+type Navigation = NativeStackNavigationProp<CaptureStackParamList, 'Camera'>;
+
 export default function Camera() {
-  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
+  const navigation = useNavigation<Navigation>();
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -77,7 +76,7 @@ export default function Camera() {
       return;
     }
     const picked = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'], // MediaTypeOptions is deprecated as of SDK 54+ - use the array form.
+      mediaTypes: ['images'],
       quality: 1,
     });
     if (picked.canceled || picked.assets.length === 0) return;
@@ -86,8 +85,11 @@ export default function Camera() {
   };
 
   if (!permission) {
-    // Permission state is still loading.
-    return <Screen><View style={styles.center} /></Screen>;
+    return (
+      <Screen>
+        <View style={styles.center} />
+      </Screen>
+    );
   }
 
   if (!permission.granted) {

@@ -35,19 +35,20 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useNavigation } from '@react-navigation/native';
 
-import Capture from '@/screens/Capture';
+import Camera from '@/screens/Camera';
 import NutritionSummary from '@/screens/NutritionSummary';
 import PlaceholderScreen from '@/screens/PlaceholderScreen';
 import { theme } from '@/theme';
 import type { CaptureStackParamList } from './types';
+import RecognitionResults from '@/screens/RecognitionResults';
 
 const Stack = createNativeStackNavigator<CaptureStackParamList>();
 
 // M3/M4 replace this with the real Screen 2 (07 §2).
-function RecognitionResults() {
+/*function RecognitionResults() {
   return <PlaceholderScreen label="Recognition Results" />;
 }
-
+*/
 type SummaryProps = NativeStackScreenProps<CaptureStackParamList, 'NutritionSummary'>;
 
 /** Adapter: route params in, navigation side effects out. See the header note. */
@@ -77,7 +78,7 @@ export default function CaptureStack() {
         contentStyle: { backgroundColor: theme.color.bg },
       }}
     >
-      <Stack.Screen name="Camera" component={Capture} options={{ headerShown: false }} />
+      <Stack.Screen name="Camera" component={Camera} options={{ headerShown: false }} />
       <Stack.Screen
         name="RecognitionResults"
         component={RecognitionResults}

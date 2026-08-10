@@ -1,38 +1,63 @@
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { useState } from 'react';
-import { Alert, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useMemo, useState } from 'react';
+import { Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import PredictionCard from '@/components/PredictionCard';
 import PrimaryButton from '@/components/PrimaryButton';
-import Screen from '@/components/Screen';
-import type { AppStackParamList } from '@/navigation/AppStack';
+import { Screen } from '@/components/states';
+import type { CaptureStackParamList } from '@/navigation/types';
 import { theme } from '@/theme';
+import type { MealType } from '@/types/api';
 
-type ResultsRoute = RouteProp<AppStackParamList, 'RecognitionResults'>;
+type ResultsRoute = RouteProp<CaptureStackParamList, 'RecognitionResults'>;
+type Navigation = NativeStackNavigationProp<CaptureStackParamList, 'RecognitionResults'>;
 
-// Screen 2 (07-mobile-app.md §2): show predictions + let the user pick when
-// unsure (FR04). Portion estimation (M4) and nutrition/logging (M5) aren't
-// built yet, so "Confirm" ends the flow here for now instead of a dead click.
+const PORTION_STEP_G = 10;
+
+/** Simple time-of-day default — the user can still be wrong, this just saves a tap. */
+function inferMealType(): MealType {
+  const hour = new Date().getHours();
+  if (hour < 11) return 'breakfast';
+  if (hour < 16) return 'lunch';
+  if (hour < 21) return 'dinner';
+  return 'snack';
+}
+
 export default function RecognitionResults() {
-  const navigation = useNavigation<NativeStackNavigationProp<AppStackParamList>>();
+  const navigation = useNavigation<Navigation>();
   const { params } = useRoute<ResultsRoute>();
   const { imageUri, result } = params;
 
   const top = result.items[0];
   const [selectedClass, setSelectedClass] = useState(top.food101_class);
 
-  const selectedLabel = result.low_confidence
-    ? (result.alternatives.find((a) => a.food101_class === selectedClass)?.display_name ??
-      top.display_name)
-    : top.display_name;
+  const selected = useMemo(() => {
+    if (!result.low_confidence) return top;
+    const alt = result.alternatives.find((a) => a.food101_class === selectedClass);
+    return alt
+      ? { ...top, food101_class: alt.food101_class, display_name: alt.display_name, confidence: alt.confidence }
+      : top;
+  }, [result, selectedClass, top]);
+
+  const [portionG, setPortionG] = useState(top.portion?.point_g ?? 100);
+  const minG = top.portion?.min_g ?? 50;
+  const maxG = top.portion?.max_g ?? 500;
+
+  const adjustPortion = (delta: number) => {
+    setPortionG((current) => Math.min(maxG, Math.max(minG, current + delta)));
+  };
 
   const handleConfirm = () => {
-    Alert.alert(
-      `${selectedLabel} confirmed`,
-      "Portion estimation and nutrition logging aren't built yet (M4/M5) - this is as far as the flow goes for now.",
-      [{ text: 'OK', onPress: () => navigation.navigate('Tabs') }],
-    );
+    navigation.navigate('NutritionSummary', {
+      food101_class: selected.food101_class,
+      display_name: selected.display_name,
+      portion_confirmed_g: portionG,
+      portion_min_g: top.portion?.min_g ?? null,
+      portion_max_g: top.portion?.max_g ?? null,
+      confidence_score: selected.confidence,
+      meal_type: inferMealType(),
+    });
   };
 
   return (
@@ -42,7 +67,7 @@ export default function RecognitionResults() {
 
         {result.low_confidence ? (
           <View style={styles.section}>
-            <Text style={styles.title}>Not quite sure - pick the closest match</Text>
+            <Text style={styles.title}>Not quite sure — pick the closest match</Text>
             {result.alternatives.map((alt) => (
               <PredictionCard
                 key={alt.food101_class}
@@ -60,8 +85,31 @@ export default function RecognitionResults() {
           </View>
         )}
 
+        <View style={styles.section}>
+          <Text style={styles.title}>Estimated portion</Text>
+          <View style={styles.portionRow}>
+            <Pressable
+              onPress={() => adjustPortion(-PORTION_STEP_G)}
+              style={styles.portionButton}
+              accessibilityRole="button"
+              accessibilityLabel="Decrease portion"
+            >
+              <Text style={styles.portionButtonText}>−</Text>
+            </Pressable>
+            <Text style={styles.portionValue}>{Math.round(portionG)} g</Text>
+            <Pressable
+              onPress={() => adjustPortion(PORTION_STEP_G)}
+              style={styles.portionButton}
+              accessibilityRole="button"
+              accessibilityLabel="Increase portion"
+            >
+              <Text style={styles.portionButtonText}>+</Text>
+            </Pressable>
+          </View>
+        </View>
+
         <PrimaryButton label="Confirm" onPress={handleConfirm} />
-        <PrimaryButton label="Retake photo" onPress={() => navigation.replace('Camera')} />
+        <PrimaryButton label="Retake photo" variant="secondary" onPress={() => navigation.replace('Camera')} />
       </ScrollView>
     </Screen>
   );
@@ -80,13 +128,28 @@ const styles = StyleSheet.create({
     backgroundColor: theme.color.surface,
     marginBottom: theme.space(2),
   },
-  section: {
-    marginBottom: theme.space(4),
-  },
+  section: { marginBottom: theme.space(4) },
   title: {
     color: theme.color.textPrimary,
     fontSize: 18,
     fontWeight: '600',
     marginBottom: theme.space(3),
   },
+  portionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.space(6),
+  },
+  portionButton: {
+    width: 44,
+    height: 44,
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  portionButtonText: { color: theme.color.textPrimary, fontSize: 22 },
+  portionValue: { color: theme.color.textPrimary, fontSize: 20, fontWeight: '500', minWidth: 80, textAlign: 'center' },
 });
