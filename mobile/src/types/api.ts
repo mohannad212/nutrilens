@@ -190,3 +190,37 @@ export interface MealsListResponse {
   offset: number;
   meals: MealSummary[];
 }
+/** `03 §3` — the authenticated user's profile. */
+export type Sex = 'male' | 'female';
+export type ActivityLevel =
+  | 'sedentary'
+  | 'light'
+  | 'moderate'
+  | 'active'
+  | 'very_active';
+
+export interface UserProfile {
+  user_id: number;
+  username: string;
+  email: string;
+  health_goal: HealthGoal;
+  created_at: string;
+  height_cm: number | null;
+  weight_kg: number | null;
+  birth_year: number | null;
+  sex: Sex | null;
+  activity_level: ActivityLevel | null;
+}
+
+export interface UpdateGoalRequest {
+  health_goal: HealthGoal;
+}
+
+/** `03 §3` — any subset; an omitted key is unchanged, an explicit null clears it. */
+export interface UpdateMetricsRequest {
+  height_cm?: number | null;
+  weight_kg?: number | null;
+  birth_year?: number | null;
+  sex?: Sex | null;
+  activity_level?: ActivityLevel | null;
+}

@@ -55,3 +55,22 @@ export async function getMeals(params?: {
 export async function deleteMeal(logId: number): Promise<void> {
   await api.delete(`/meals/${logId}`);
 }
+import type { UpdateGoalRequest, UpdateMetricsRequest, UserProfile } from '@/types/api';
+
+/** `03 §3` — the signed-in user's profile. */
+export async function getProfile(): Promise<UserProfile> {
+  const { data } = await api.get<UserProfile>('/users/me');
+  return data;
+}
+
+/** `03 §3` / FR13 — takes effect on the next recommendation refresh, not immediately. */
+export async function updateGoal(body: UpdateGoalRequest): Promise<UserProfile> {
+  const { data } = await api.patch<UserProfile>('/users/me/goal', body);
+  return data;
+}
+
+/** `03 §3` — any subset of the five body metrics. */
+export async function updateMetrics(body: UpdateMetricsRequest): Promise<UserProfile> {
+  const { data } = await api.patch<UserProfile>('/users/me/metrics', body);
+  return data;
+}
