@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 
 import { loginRequest } from '@/api/auth';
-import type { ApiError } from '@/api/errors';
+import type { ApiError } from '@/api/client';
 import { useAuth } from '@/store/AuthContext';
 import type { LoginRequest, TokenResponse } from '@/types/auth';
 

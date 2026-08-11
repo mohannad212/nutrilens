@@ -1,8 +1,5 @@
-import type { AxiosError } from 'axios';
-
 import type { RecognitionResponse } from '@/types/api';
 import { api } from './client';
-import { type ApiErrorEnvelope, normaliseError } from './errors';
 
 /**
  * POST /recognise (03-api-specification.md §4) - the one multipart endpoint.
@@ -25,12 +22,14 @@ export async function recogniseRequest(imageUri: string): Promise<RecognitionRes
   // for a file field - not a real Blob, but this is the documented pattern.
   formData.append('image', { uri: imageUri, name: filename, type } as unknown as Blob);
 
-  try {
-    const res = await api.post<RecognitionResponse>('/recognise', formData, {
-      timeout: 30000, // inference can be slower than the default 15s
-    });
-    return res.data;
-  } catch (err) {
-    throw normaliseError(err as AxiosError<ApiErrorEnvelope>);
-  }
+  // No local try/catch: `client.ts`'s response interceptor already rejects with
+  // an `ApiError`. Catching and re-normalising here fed an already-normalised
+  // error back into a second normaliser, which looked for `.response` on it,
+  // found none, and concluded the request never reached the server — so every
+  // failure from this endpoint surfaced as "You're offline", including a plain
+  // NO_FOOD_DETECTED. Let the interceptor's error through untouched.
+  const res = await api.post<RecognitionResponse>('/recognise', formData, {
+    timeout: 30000, // inference can be slower than the default 15s
+  });
+  return res.data;
 }

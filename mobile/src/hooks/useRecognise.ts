@@ -1,7 +1,7 @@
 import { useMutation } from '@tanstack/react-query';
 
 import { recogniseRequest } from '@/api/recognition';
-import type { ApiError } from '@/api/errors';
+import type { ApiError } from '@/api/client';
 import type { RecognitionResponse } from '@/types/api';
 
 // One hook per endpoint (07-mobile-app.md §4).
