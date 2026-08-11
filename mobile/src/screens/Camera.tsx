@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import { useRef, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import PrimaryButton from '@/components/PrimaryButton';
 import { Screen, messageForError } from '@/components/states';
@@ -14,10 +14,47 @@ import { theme } from '@/theme';
 
 const MIN_WIDTH = 640;
 const MIN_HEIGHT = 480;
-const MAX_LONG_EDGE = 1600;
+
+/**
+ * The upload's long edge. Was 1600, which cost encode time and bytes for detail
+ * nothing downstream reads: the classifier resizes to EfficientNet-B4's 380 px
+ * input and the segmenter to its own smaller one. 1024 is still ~2.7x the model
+ * input and stays clear of the server's 640x480 minimum (03 §4) even for a 4:3
+ * frame, which lands at 1024x768.
+ */
+const MAX_LONG_EDGE = 1024;
 const JPEG_QUALITY = 0.8;
 
+/**
+ * Capture quality, not upload quality. The frame is re-encoded a moment later at
+ * `JPEG_QUALITY` anyway, so asking the camera for a near-lossless 12 MP JPEG
+ * first only buys a slower shutter and a larger bitmap to decode and downscale.
+ */
+const CAPTURE_QUALITY = 0.6;
+
 type Navigation = NativeStackNavigationProp<CaptureStackParamList, 'Camera'>;
+
+/**
+ * Target width for the upload, or null to send it untouched.
+ *
+ * Capping the *long* edge alone is not safe, because the server's floor is
+ * per-axis (`width >= 640 AND height >= 480`, `03 §4`) and the short edge is what
+ * a cap pushes under it. A 16:9 portrait frame scaled to a 1024 long edge lands
+ * at 576x1024 — rejected on width, even though it is the taller image. Aspect
+ * ratio varies by device and camera mode, so this has to be computed rather than
+ * assumed.
+ *
+ * The shrink target and the server's minimums pull in opposite directions, so
+ * take whichever scale is larger: shrink as far as MAX_LONG_EDGE asks, but never
+ * past the point where either axis breaches its minimum. `ceil` because a
+ * rounding-down of half a pixel is the difference between 640 and a 400.
+ */
+function downscaledWidth(width: number, height: number): number | null {
+  const shrink = Math.min(1, MAX_LONG_EDGE / Math.max(width, height));
+  const floor = Math.max(MIN_WIDTH / width, MIN_HEIGHT / height);
+  const scale = Math.max(shrink, floor);
+  return scale >= 1 ? null : Math.ceil(width * scale);
+}
 
 export default function Camera() {
   const navigation = useNavigation<Navigation>();
@@ -37,15 +74,8 @@ export default function Camera() {
 
     setIsCapturing(true);
     try {
-      const longEdge = Math.max(width, height);
-      const resizeAction =
-        longEdge > MAX_LONG_EDGE
-          ? [
-              width >= height
-                ? { resize: { width: MAX_LONG_EDGE } }
-                : { resize: { height: MAX_LONG_EDGE } },
-            ]
-          : [];
+      const targetWidth = downscaledWidth(width, height);
+      const resizeAction = targetWidth ? [{ resize: { width: targetWidth } }] : [];
 
       const manipulated = await ImageManipulator.manipulateAsync(uri, resizeAction, {
         compress: JPEG_QUALITY,
@@ -70,7 +100,7 @@ export default function Camera() {
 
   const handleShutter = async () => {
     if (!cameraRef.current || isCapturing) return;
-    const photo = await cameraRef.current.takePictureAsync({ quality: 0.9 });
+    const photo = await cameraRef.current.takePictureAsync({ quality: CAPTURE_QUALITY });
     if (!photo) return;
     await processAndSubmit(photo.uri, photo.width, photo.height);
   };
@@ -155,7 +185,17 @@ export default function Camera() {
           <View style={styles.secondaryButton} />
         </View>
 
-        {isCapturing ? <Text style={styles.statusText}>Recognising...</Text> : null}
+        {/*
+          The shutter is disabled for the whole round trip (capture, downscale,
+          upload, inference), so without a moving indicator the screen reads as
+          frozen rather than busy — the reason this felt like "waiting a lot".
+        */}
+        {isCapturing ? (
+          <View style={styles.statusRow}>
+            <ActivityIndicator color={theme.color.accent} />
+            <Text style={styles.statusText}>Recognising…</Text>
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -215,15 +255,17 @@ const styles = StyleSheet.create({
   shutterDisabled: { opacity: 0.5 },
   secondaryButton: { width: 60, alignItems: 'center' },
   secondaryText: { color: '#fff', fontSize: 13 },
-  statusText: {
+  statusRow: {
     position: 'absolute',
     top: '45%',
     alignSelf: 'center',
-    color: '#fff',
-    fontSize: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.space(2),
     backgroundColor: 'rgba(0,0,0,0.6)',
     paddingHorizontal: theme.space(4),
     paddingVertical: theme.space(2),
     borderRadius: theme.radius.md,
   },
+  statusText: { color: '#fff', fontSize: 16 },
 });
