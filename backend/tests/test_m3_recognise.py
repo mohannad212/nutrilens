@@ -41,7 +41,8 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image, ImageFilter
 
-from app.deps import get_classifier, get_current_user
+from app.deps import get_classifier, get_current_user, get_food_gate
+from app.ml.food_gate import GateVerdict
 from app.main import create_app
 
 RECOGNISE_URL = "/api/v1/recognise"
@@ -199,3 +200,72 @@ def test_no_image_written_to_disk(monkeypatch):
 
     resp = _upload(client, data)
     assert resp.status_code == 200  # succeeds without ever calling the guards
+
+
+# ------------------------- open-set gate vs. the floor -------------------------
+# Neither the `FoodGate` nor `no_food_confidence_floor` had any coverage before
+# this block, which is how a false "No food detected" on a real plate of food
+# reached the app. The rule under test: rejection is the *gate's* call, and a low
+# Food-101 score is a pick-list (FR04), not a refusal.
+
+FLAT_PREDS = [("carrot_cake", 0.18), ("ravioli", 0.11), ("deviled_eggs", 0.09)]
+
+
+class StubGate:
+    """Stands in for the ImageNet FoodGate with a fixed food probability."""
+
+    def __init__(self, food_probability: float, top_label: str = "plate"):
+        self._verdict = GateVerdict(
+            food_probability=food_probability,
+            top_label=top_label,
+            top_probability=0.7,
+        )
+
+    def inspect(self, image):
+        return self._verdict
+
+
+def _make_gated_client(predictions, gate):
+    app = create_app()
+    app.dependency_overrides[get_classifier] = lambda: StubClassifier(predictions)
+    app.dependency_overrides[get_current_user] = lambda: object()
+    app.dependency_overrides[get_food_gate] = lambda: gate
+    return TestClient(app)
+
+
+def test_gate_rejects_non_food():
+    """Below `food_gate_min_prob` the upload is refused — the gate's own job."""
+    client = _make_gated_client(CONFIDENT_PREDS, StubGate(0.01, top_label="laptop"))
+    resp = _upload(client, _jpeg_bytes())
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "NO_FOOD_DETECTED"
+
+
+def test_flat_prediction_past_the_gate_is_a_picklist_not_a_rejection():
+    """A real plate whose dish Food-101 lacks must not return NO_FOOD_DETECTED.
+
+    This is the scrambled-eggs case: the gate is confident it is food (0.96),
+    while Food-101 has no matching class and spreads its mass thin. Rejecting
+    here told the user "no food detected" about a photo of food.
+    """
+    client = _make_gated_client(FLAT_PREDS, StubGate(0.96))
+    resp = _upload(client, _jpeg_bytes())
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["low_confidence"] is True
+    assert [a["food101_class"] for a in body["alternatives"]] == [
+        "carrot_cake",
+        "ravioli",
+        "deviled_eggs",
+    ]
+
+
+def test_floor_still_applies_when_the_gate_is_unavailable():
+    """With no gate loaded the floor is the only open-set check left — keep it."""
+    client = _make_gated_client(FLAT_PREDS, None)
+    resp = _upload(client, _jpeg_bytes())
+
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "NO_FOOD_DETECTED"

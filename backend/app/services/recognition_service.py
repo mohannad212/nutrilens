@@ -26,11 +26,11 @@ HOW IT WORKS INTERNALLY
      decoded in-memory RGB image — or raises the specific 4xx.
   2. `classifier.predict(image, top_k=3)` returns the top-3 `(class, confidence)`
      pairs, highest first.
-  3. Out-of-distribution gate: if even the top-1 falls below
-     `settings.no_food_confidence_floor` (default 0.25), raise
-     `NoFoodDetectedError` (400). Food-101 has no "not food" class, so the model
-     always names *some* food; a near-uniform distribution is the only available
-     evidence that the subject is not a meal.
+  3. Out-of-distribution rejection is the `FoodGate`'s call (`ml/food_gate.py`),
+     made before the specialist runs. `settings.no_food_confidence_floor`
+     (default 0.25) survives only as a fallback for when the gate could not be
+     loaded: a near-uniform Food-101 distribution is weak evidence of "not food",
+     and it is not consulted at all once the gate has cleared the image.
   4. The top-1 becomes the single `items[0]` (rank 1). If a portion estimator is
      wired and `settings.portion_enabled`, the M4 pipeline (`05`) estimates its
      mass range and attaches a `portion` object; otherwise `portion` is null and
@@ -62,15 +62,22 @@ A: The contract always returns a best guess in `items`; `low_confidence` +
    whether to auto-select the top-1 or ask the user (`07`).
 
 Q: "How does the app know a photo isn't food at all? Food-101 has no such class."
-A: It infers it from the *shape* of the output. A closed-set softmax over 101
-   food classes must assign its mass to some food, so an unrelated subject (a
-   laptop, a face) produces a diffuse distribution — top-1 around 0.1-0.2 rather
-   than the 0.6-0.95 a real dish scores. `no_food_confidence_floor` turns that
-   into a rejection. It is a heuristic, not a true open-set method: the rigorous
-   alternatives are an explicit background class trained on non-food images, or
-   an OOD detector (ODIN / energy-based scoring). Both need data or training
-   changes beyond this build, and are the honest answer to "how would you improve
-   it?".
+A: A second model that has seen non-food answers it — the ImageNet-based
+   `FoodGate`, run before the specialist. See `ml/food_gate.py` for why the
+   closed-set confidence score cannot answer this question on its own.
+
+Q: "Then why does `no_food_confidence_floor` still exist?"
+A: As the fallback for a missing gate. `deps.get_food_gate` fails open, so if the
+   ImageNet weights are unavailable the endpoint would otherwise have no open-set
+   check at all; a flat distribution is poor evidence, but it beats none. When the
+   gate did run, the floor is skipped entirely.
+
+Q: "Why doesn't a low Food-101 score reject the photo any more?"
+A: Because it was rejecting real meals. Once the gate has said "this is food", a
+   flat Food-101 distribution means the *label set* is short of the dish, not that
+   the plate is empty — scrambled eggs, and most cuisines Food-101 never sampled,
+   land exactly there. The honest response is the FR04 pick-list plus manual
+   correction, not a retake prompt for a photo that was fine.
 
 Q: "Why not just raise `confidence_threshold` instead of adding a second one?"
 A: They answer different questions. `confidence_threshold` (0.60) asks "am I sure
@@ -159,6 +166,7 @@ def recognise(
     # Open-set gate, ahead of the specialist: Food-101 has no "not food" class,
     # so this is the only stage that can answer "is this a meal at all?". Skipped
     # when the gate isn't loaded (fail open — see `deps.get_food_gate`).
+    gate_cleared = False
     if food_gate is not None:
         verdict = food_gate.inspect(image)
         if verdict.food_probability < settings.food_gate_min_prob:
@@ -169,15 +177,20 @@ def recognise(
                     "looks_like": verdict.top_label,
                 }
             )
+        gate_cleared = True
 
     predictions = classifier.predict(image, top_k=_TOP_K)  # [(class, conf), ...]
 
     top_class, top_conf = predictions[0]
 
-    # Backstop for anything the gate let through: a distribution this flat means
-    # the specialist has no real opinion either. Checked before portion
-    # estimation — no point measuring the mass of something we don't call food.
-    if top_conf < settings.no_food_confidence_floor:
+    # Fallback open-set check for when the gate is unavailable. A flat Food-101
+    # distribution is weak evidence of "not food" (see `food_gate.py`: confidence
+    # answers *which of the 101*, never *whether any of the 101*), so it is only
+    # trusted when nothing better has spoken. Once the gate has cleared the image,
+    # a low score means "unsure which dish" — that is the FR04 pick-list's job,
+    # and rejecting there is what refused real meals whose dish Food-101 has no
+    # class for (scrambled eggs, most non-Western cuisines).
+    if not gate_cleared and top_conf < settings.no_food_confidence_floor:
         raise NoFoodDetectedError(
             details={
                 "top_confidence": round(top_conf, 4),
