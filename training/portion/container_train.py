@@ -202,8 +202,25 @@ def evaluate(model, loader, device):
     return acc, per_class
 
 
+def _pick_device() -> str:
+    """Best available accelerator: CUDA, else Apple MPS, else CPU.
+
+    MPS matters here, not as a nicety: this is a 2.5 M-param MobileNetV3-Small and
+    the development machine is an Apple laptop with no CUDA. Benchmarked on it —
+    CPU 13 img/s (~33 min for the 10-epoch run) vs MPS 132 img/s (~3 min). The
+    original `cuda if available else cpu` line therefore silently sent every local
+    run to the CPU at a tenth of the speed, which is what made retraining feel like
+    a Colab-sized job when it is a coffee-break-sized one.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def train(data_root: str, out_dir: Path, batch_size: int, workers: int) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(_pick_device())
     print(f"Device: {device}")
     train_loader, val_loader = build_loaders(data_root, batch_size, workers)
     model = build_model().to(device)
