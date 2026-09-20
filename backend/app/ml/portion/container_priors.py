@@ -158,3 +158,46 @@ def uncertainty_band(prior: ContainerPrior) -> tuple[float, float]:
     lo = (prior.min_cm / typ) ** 2
     hi = (prior.max_cm / typ) ** 2
     return lo, hi
+
+
+# The largest single mistake Stage 1 can make is a bowl/plate mixup: applying the
+# 27 cm `dinner_plate` prior to an 18 cm `bowl_large` scales mass by (27/18)² =
+# **2.25x**. This is not hypothetical — the 2026-08 audit caught the soup bowl
+# classified `dinner_plate` at 0.809 confidence (`13-portion-accuracy-backlog.md`
+# §5). Until the classifier is retrained on a size taxonomy (§5c), the honest move
+# is to keep its argmax but let its own doubt widen the band.
+CONTAINER_CONFUSION_RATIO = 2.25
+
+
+def confidence_widen(confidence: float) -> float:
+    """Multiplicative band widening implied by the classifier's own confidence.
+
+    `1 + (1 - p)·(RATIO - 1)`: at p=1.0 the band is untouched, and as p falls the
+    band stretches toward the full bowl/plate confusion ratio. At p=0.99 that is
+    ×1.01 (effectively free when the model is sure); at p=0.81 — the confidence on
+    the misclassified soup bowl — it is ×1.24.
+
+    WHY THIS SHAPE. The alternative is a mixture band spanning bowl-min to
+    plate-max, which is **3.5x wide** for *every* photo regardless of confidence —
+    too wide to show a user, and it throws away the information that the model is
+    usually right. Committing to argmax and widening by the residual doubt keeps
+    the common (confident) case tight while making the uncertain case visibly
+    uncertain. It is a statement about a real, named source of error, not a
+    coverage-buying widen (see the backlog's COMMON MISTAKES).
+    """
+    p = max(0.0, min(float(confidence), 1.0))
+    return 1.0 + (1.0 - p) * (CONTAINER_CONFUSION_RATIO - 1.0)
+
+
+def widen_for_confidence(
+    band: tuple[float, float], confidence: float
+) -> tuple[float, float]:
+    """Stretch a container band outward by `confidence_widen(confidence)`.
+
+    Applied to the *mass* band symmetrically in log-space (lo ÷ w, hi × w) — the
+    size prior's own min/max asymmetry is preserved, and the classifier's doubt is
+    layered on top of it rather than replacing it.
+    """
+    lo, hi = band
+    w = confidence_widen(confidence)
+    return lo / w, hi * w

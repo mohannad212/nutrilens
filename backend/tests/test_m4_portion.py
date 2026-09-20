@@ -50,7 +50,7 @@ from PIL import Image
 from app.config import settings
 from app.deps import get_classifier, get_current_user, get_portion_estimator
 from app.main import create_app
-from app.ml.portion import PortionEstimator, describe_scale_source, shape_priors
+from app.ml.portion import PortionEstimator, container_priors, describe_scale_source, shape_priors
 from app.ml.portion.densities import density_of
 
 IMG_W, IMG_H = 640, 480
@@ -75,14 +75,15 @@ def _shape_only_cm_per_px() -> float:
 
 
 class StubContainerModel:
-    def __init__(self, container_class="dinner_plate", rim_area_px=200_000.0):
+    def __init__(self, container_class="dinner_plate", rim_area_px=200_000.0, conf=0.9):
         self._class = container_class
         self._area = rim_area_px
+        self._conf = conf
 
     def classify(self, image):
-        return (self._class, 0.9)
+        return (self._class, self._conf)
 
-    def rim_area_px(self, image):
+    def rim_area_px(self, image, food_mask=None):
         return self._area
 
 
@@ -143,7 +144,10 @@ def test_container_model_upgrades_to_container_prior():
     cm_per_px = math.sqrt(_round_area(27.0) / 200_000.0)
     area_cm2 = 50_000 * cm_per_px**2
     mass = area_cm2 * 1.5 * density_of("pizza")
-    lo, hi = (24.0 / 27.0) ** 2, (30.0 / 27.0) ** 2
+    # Range-derived band, then stretched by the classifier's residual doubt
+    # (stub confidence 0.9 -> x1.125); see container_priors.confidence_widen.
+    w = container_priors.confidence_widen(0.9)
+    lo, hi = (24.0 / 27.0) ** 2 / w, (30.0 / 27.0) ** 2 * w
 
     assert r.method == "container_prior"
     assert r.reference == "dinner_plate"
@@ -159,12 +163,42 @@ def test_container_band_is_range_derived_and_asymmetric():
 
     cm_per_px = math.sqrt(_round_area(27.0) / 150_000.0)
     mass = 50_000 * cm_per_px**2 * 1.5 * density_of("pizza")
-    lo, hi = (24.0 / 27.0) ** 2, (30.0 / 27.0) ** 2
+    w = container_priors.confidence_widen(0.9)
+    lo, hi = (24.0 / 27.0) ** 2 / w, (30.0 / 27.0) ** 2 * w
 
     assert r.min_g == round(mass * lo, 1)
     assert r.max_g == round(mass * hi, 1)
     # Squaring is non-linear: the upside (+24%) exceeds the downside (-21%).
     assert (r.max_g - r.point_g) > (r.point_g - r.min_g)
+
+
+def test_container_band_widens_when_the_classifier_is_unsure():
+    """An unconfident container guess must show up as a wider band, not a silent risk.
+
+    The Stage-1 classifier's worst realistic mistake is a bowl read as a plate —
+    (27/18)² = 2.25x in mass. Rather than hide that behind an argmax, the band is
+    stretched by the model's own residual doubt: free when it is sure, visibly
+    wider when it is not. The point estimate must NOT move — this is a statement
+    about uncertainty, not a re-estimate.
+    """
+    def band(conf):
+        est = PortionEstimator(
+            container_model=StubContainerModel("dinner_plate", 150_000.0, conf=conf)
+        )
+        r = est.estimate(_img(), "pizza", mask=_rect_mask(50_000))
+        return r
+
+    sure, unsure = band(0.99), band(0.81)
+
+    # Same photo, same argmax -> identical point estimate at both confidences.
+    assert sure.point_g == unsure.point_g
+    # ...but the doubt is visible in the width.
+    assert unsure.min_g < sure.min_g
+    assert unsure.max_g > sure.max_g
+    # At p=0.99 the widening is ~1%: confidence costs the user almost nothing.
+    assert container_priors.confidence_widen(0.99) == pytest.approx(1.0125)
+    # A certain classifier leaves the range-derived band exactly as it was.
+    assert container_priors.confidence_widen(1.0) == 1.0
 
 
 def test_square_container_scales_by_area_not_circle():
@@ -579,3 +613,126 @@ def test_math_helpers_are_consistent():
     area = 123.4
     r = _radius_from_area(area)
     assert math.isclose(math.pi * r * r, area, rel_tol=1e-9)
+
+
+# ----------------------- 2026-08 audit: structural guards --------------------
+def test_pile_height_is_capped():
+    """`h_eff = k·√A` must stop growing at PILE_MAX_HEIGHT_CM — piles slump.
+
+    Without the cap mass scales as A^1.5 without bound, so a generous mask on a
+    wide serving blows past the class clamp and every big pile reads at its
+    ceiling (the measured spaghetti failure, on every pile class at once).
+    """
+    from app.ml.portion.shape_priors import PILE_MAX_HEIGHT_CM, ShapeModel, volume_cm3
+
+    k = 0.4
+    small_a = 100.0  # k·√A = 4.0 < cap: un-capped regime unchanged
+    assert volume_cm3(ShapeModel.IRREGULAR_PILE, small_a, 1.2, k) == pytest.approx(
+        small_a * k * math.sqrt(small_a)
+    )
+    big_a = 400.0  # k·√A = 8.0 > cap: height pinned, mass linear in area again
+    assert volume_cm3(ShapeModel.IRREGULAR_PILE, big_a, 1.2, k) == pytest.approx(
+        big_a * PILE_MAX_HEIGHT_CM
+    )
+
+
+def test_tall_food_tilt_correction_applies_to_mounds_only():
+    """An oblique container scale must de-foreshorten tall (ELLIPSOID/DOME)
+    classes by the rim's axis ratio, and leave flat classes untouched.
+
+    The area-based scale self-corrects tilt for flat food (plate and food
+    foreshorten together); a tall mound's silhouette doesn't shrink with tilt,
+    so on a weighed 203 g donut plate at ~60° the uncorrected estimate read
+    337 g and the corrected one 167 g.
+    """
+
+    class TiltedContainer:
+        def __init__(self, tilt):
+            self._tilt = tilt
+
+        def classify(self, image):
+            return ("dinner_plate", 0.9)
+
+        def rim_area_px(self, image, food_mask=None):
+            return 150_000.0
+
+        def rim_ellipse(self, image, food_mask=None):
+            return (150_000.0, self._tilt)
+
+    # Big enough that raw mass sits inside the donuts clamp band at both
+    # tilts (a tiny mask pins both estimates to clamp_min and hides the ratio).
+    mask = np.zeros((IMG_H, IMG_W), dtype=bool)
+    mask[100:300, 200:400] = True
+
+    def point(food_class, tilt):
+        est = PortionEstimator(container_model=TiltedContainer(tilt))
+        return est.estimate(_img(), food_class, mask=mask).point_g
+
+    # donuts = ELLIPSOID (tall): halving the axis ratio halves the mass.
+    assert point("donuts", 0.5) == pytest.approx(point("donuts", 1.0) * 0.5, rel=0.02)
+    # pizza = FLAT_DISC: tilt must change nothing.
+    assert point("pizza", 0.5) == pytest.approx(point("pizza", 1.0))
+
+
+# ---------------- §3: derived bowl fill depth (geometry, off by default) --------
+def test_derived_fill_depth_matches_hemispherical_geometry():
+    """`d = R(1 - sqrt(1 - fill_ratio))` — checked against the closed form.
+
+    This is the whole point of §3: the depth is *derived* from two areas the
+    pipeline already measures, not assumed from a per-class constant. There is no
+    free parameter to tune, so the test can pin the exact value.
+    """
+    rim_area = 100.0  # cm^2 -> R = sqrt(100/pi)
+    R = math.sqrt(rim_area / math.pi)
+    for fill_ratio in (0.2, 0.4, 0.6, 0.8):
+        expected = R * (1.0 - math.sqrt(1.0 - fill_ratio))
+        got = shape_priors.derived_fill_depth_cm(rim_area, rim_area * fill_ratio)
+        assert got == pytest.approx(expected, rel=1e-9)
+
+
+def test_derived_fill_depth_is_monotonic_in_fill_ratio():
+    """A larger liquid surface must mean a deeper fill — the model's core claim."""
+    depths = [shape_priors.derived_fill_depth_cm(200.0, 200.0 * f) for f in (0.2, 0.4, 0.6, 0.8)]
+    assert all(a < b for a, b in zip(depths, depths[1:], strict=False))
+
+
+def test_derived_fill_depth_declines_when_the_model_cannot_apply():
+    """Food at least as wide as the rim is not liquid *in* a bowl — no answer."""
+    assert shape_priors.derived_fill_depth_cm(100.0, 100.0) is None
+    assert shape_priors.derived_fill_depth_cm(100.0, 150.0) is None
+    assert shape_priors.derived_fill_depth_cm(0.0, 10.0) is None
+    assert shape_priors.derived_fill_depth_cm(100.0, 0.0) is None
+
+
+def test_bowl_depth_derivation_is_off_by_default():
+    """Locks the honest status: implemented, unvalidated, therefore not enabled.
+
+    §3 needs a reliable container rim; §4 tried to supply one and failed its own
+    measurement, and the single weighed bowl in the set produces no rim at all.
+    Enabling this without weighed bowls would be tuning an unobservable to n=1 —
+    the exact mistake the audit kept catching.
+    """
+    from app.config import Settings
+
+    assert Settings().portion_derive_bowl_depth is False
+
+
+def test_bowl_depth_derivation_changes_the_mass_when_enabled():
+    """When switched on, a shallow fill must weigh less than the flat prior gives.
+
+    Guards the wiring (rim area actually reaches the geometry) independently of
+    the default, so the mechanism is covered even while it ships disabled.
+    """
+    # A wide container with a small liquid surface: a shallow fill. The mask size
+    # is chosen so both masses land inside lobster_bisque's [150, 600] g clamp —
+    # otherwise both pin to the floor and the test passes for the wrong reason.
+    est = PortionEstimator(container_model=StubContainerModel("dinner_plate", 150_000.0))
+    mask = _rect_mask(30_000)  # fill_ratio 0.2 -> derived 1.43 cm vs the 2.0 prior
+    with_prior = est.estimate(_img(), "lobster_bisque", mask=mask).point_g
+    settings.portion_derive_bowl_depth = True
+    try:
+        derived = est.estimate(_img(), "lobster_bisque", mask=mask).point_g
+    finally:
+        settings.portion_derive_bowl_depth = False
+    assert derived != with_prior
+    assert derived < with_prior  # a shallow fill is lighter than the assumed depth

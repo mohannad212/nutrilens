@@ -87,7 +87,11 @@ from app.ml.classifier import load_classifier
 from app.ml.food_gate import load_food_gate
 from app.ml.portion import PortionEstimator
 from app.ml.portion.container_model import load_container_model
-from app.ml.portion.reference_detector import load_coco_reference_detector
+from app.ml.portion.reference_detector import (
+    CardReferenceDetector,
+    CompositeReferenceDetector,
+    load_coco_reference_detector,
+)
 from app.ml.portion.segmenter import load_food_segmenter
 
 logger = logging.getLogger(__name__)
@@ -142,7 +146,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         cl = Path(settings.model_dir) / settings.container_labels
         try:
             if cw.exists() and cl.exists():
-                container_model = load_container_model(str(cw), str(cl), settings.device)
+                container_model = load_container_model(
+                    str(cw), str(cl), settings.device,
+                    surface_growth=settings.rim_surface_growth_enabled,
+                )
                 logger.info("Container model loaded from %s", cw)
             else:
                 logger.info("Container model not present (%s); portion uses shape_only", cw)
@@ -162,6 +169,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except Exception:
                 reference_detector = None
                 logger.warning("Reference detector failed to load; portion skips Stage 2")
+
+        # Credit-card reference (backlog §1): classical geometry, no weights to
+        # download, so it is wired independently of the COCO detector above and
+        # survives that one failing to load. It outranks cutlery in
+        # `reference_sizes` (priority 1 vs 4) because 85.60 mm is exact where a
+        # fork's 19 cm is assumed.
+        if settings.card_reference_enabled:
+            card_detector = CardReferenceDetector(
+                ratio_tol=settings.card_ratio_tol,
+                min_long_px=settings.card_min_long_px,
+            )
+            reference_detector = (
+                CompositeReferenceDetector([card_detector, reference_detector])
+                if reference_detector is not None
+                else card_detector
+            )
+            logger.info("Card reference detector enabled (ISO ID-1, 85.60 mm)")
 
         # Food segmenter (05 §6): trained model if present, else classical fallback.
         segmenter = None

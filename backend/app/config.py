@@ -182,11 +182,59 @@ class Settings(BaseSettings):
     container_weights: str = "container_classifier.pth"
     container_labels: str = "labels_container.json"
     # Stage-2 reference-object detector (off-the-shelf COCO: fork/spoon/knife).
-    # OPT-IN: enabling it downloads a pretrained torchvision detector once at
-    # startup, so it is off by default. When on, reference objects give the
-    # tightest, plate-independent scale (05 §4).
-    reference_detector_enabled: bool = False
+    # Enabling it downloads a pretrained torchvision detector once at startup
+    # (~2 s load, ~0.15 s per request on CPU; startup degrades gracefully with
+    # no network). On since the 2026-08 audit: cutlery in frame gives the
+    # tightest, plate-independent scale (05 §4), and the audit's weighed fork
+    # photo confirmed detection works. Flip off for offline evaluation.
+    reference_detector_enabled: bool = True
     reference_score_threshold: float = 0.5
+    # Credit-card reference (backlog §1). An ISO/IEC 7810 ID-1 card is 85.60 mm
+    # exactly — the only zero-variance reference available, versus a fork's
+    # assumed 19 cm (real forks 17-21 cm => ~20% mass error). Classical geometry,
+    # no model, so it costs nothing to have on. The two thresholds are the
+    # false-positive guard and are measured, not guessed: at 12% tolerance a
+    # kitchen scale's display panel (ratio 1.42) was detected as a card; at 6%
+    # plus an 80 px floor there are zero false positives across the weighed set.
+    # Do not loosen either without re-running that audit
+    # (`scripts/card_fp_audit.py`).
+    # Stage-1 rim detection via surface growth from the food mask (backlog §4).
+    # Runs only where the Otsu rim detector declines, so it cannot change a rim
+    # that already resolved.
+    #
+    # DEFAULT OFF — IT WAS BUILT, MEASURED, AND IT MADE THINGS WORSE.
+    # It lifts rim coverage on the weighed set from 3/6 to 6/6, but the rims it
+    # finds are wrong, and a wrong ruler is worse than none: MAPE 18.2% -> 37.5%,
+    # range coverage 66.7% -> 33.3%. Inspecting the overlays (the audit's first
+    # rule: look at the artefact) shows exactly why, and the two failures are in
+    # opposite directions:
+    #   * chicken wings — the grown hull hugs the FOOD and never reaches the
+    #     plate rim, so the rim reads too small, the scale too coarse, and the
+    #     mass triples (326 g -> 600 g, clipped at the clamp, against 275 g).
+    #   * spaghetti — the hull spills past the plate and swallows the KITCHEN
+    #     SCALE underneath it, the identical failure the audit recorded when
+    #     morphological opening "rescued" this same photo.
+    # Neither is a bad container-size prior: re-running both with every prior in
+    # the table (27/20/18/13 cm) leaves the best case at 36.2% and 24.9% error,
+    # so no size makes the grown rim right.
+    # The code stays (with the evidence) because the *approach* — seed from the
+    # segmenter, grow the surface — is still the right idea; it is the colour
+    # homogeneity assumption that fails on a scalloped white paper plate. The
+    # real fix remains §4(a): give the segmenter a container class and retrain.
+    # Turn this on only with a weighed set that shows it helping.
+    rim_surface_growth_enabled: bool = False
+    # §3: derive a bowl's fill depth from the rim/surface area ratio (exact
+    # hemispherical-cap geometry, no free constants) instead of the per-class
+    # height prior. DEFAULT OFF and blocked, not abandoned: it needs a reliable
+    # container rim, §4 failed to supply one, and the single weighed bowl in the
+    # set has no rim at all — so there is currently no way to validate it. The
+    # backlog asks for two or three more weighed bowls (one shallow, one full)
+    # before this is switched on. Do not enable it to make the soup photo come
+    # out right; n=1 cannot justify replacing a prior that works for full bowls.
+    portion_derive_bowl_depth: bool = False
+    card_reference_enabled: bool = True
+    card_ratio_tol: float = 0.06
+    card_min_long_px: float = 80.0
     # Food segmentation model (05 §6). Loaded from `model_dir` when present; absent
     # -> the estimator uses the classical GrabCut fallback, then a central box.
     segmenter_weights: str = "food_segmenter.pth"

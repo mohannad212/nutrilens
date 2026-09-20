@@ -114,7 +114,10 @@ def build_estimator(use_reference: bool) -> PortionEstimator:
     container_model = None
     cw, cl = model_dir / settings.container_weights, model_dir / settings.container_labels
     if cw.exists() and cl.exists():
-        container_model = load_container_model(str(cw), str(cl), settings.device)
+        container_model = load_container_model(
+            str(cw), str(cl), settings.device,
+            surface_growth=settings.rim_surface_growth_enabled,
+        )
         print(f"  container model: {cw.name}")
 
     segmenter = None
@@ -131,6 +134,25 @@ def build_estimator(use_reference: bool) -> PortionEstimator:
             settings.device, settings.reference_score_threshold
         )
         print("  reference detector: COCO (fork/spoon/knife)")
+
+    # Mirror the app's card wiring (backlog §1). The harness MUST match
+    # production: a previous version defaulted the reference detector off after
+    # it had been enabled in config and scored 21.3% where the app gave 18.8%.
+    if settings.card_reference_enabled:
+        from app.ml.portion.reference_detector import (
+            CardReferenceDetector,
+            CompositeReferenceDetector,
+        )
+
+        card = CardReferenceDetector(
+            ratio_tol=settings.card_ratio_tol, min_long_px=settings.card_min_long_px
+        )
+        reference_detector = (
+            CompositeReferenceDetector([card, reference_detector])
+            if reference_detector is not None
+            else card
+        )
+        print("  card reference detector: on (ISO ID-1)")
 
     return PortionEstimator(
         container_model=container_model,
@@ -206,10 +228,27 @@ def main() -> None:
     ap.add_argument("--manifest", required=True, help="CSV: image,food_class,true_grams")
     ap.add_argument("--images-dir", default="", help="prefix for relative image paths")
     ap.add_argument("--out", default="artifacts/mape_report.csv")
-    ap.add_argument("--use-reference", action="store_true", help="enable COCO detector")
+    # Default to whatever the server actually runs (`reference_detector_enabled`,
+    # on since the 2026-08 audit). A harness that silently evaluates a different
+    # configuration than production reports the wrong number: with the detector
+    # off, the weighed set scored MAPE 21.3% vs 18.8% with it on, purely because
+    # the fork photos fell back to shape_only. `--no-reference` forces it off.
+    ap.add_argument(
+        "--use-reference",
+        action="store_true",
+        default=settings.reference_detector_enabled,
+        help="enable the COCO reference detector (default: follow app config)",
+    )
+    ap.add_argument(
+        "--no-reference",
+        dest="use_reference",
+        action="store_false",
+        help="force the reference detector off, whatever the app config says",
+    )
     args = ap.parse_args()
 
     images_dir = Path(args.images_dir) if args.images_dir else Path()
+    print(f"  reference detector: {'on' if args.use_reference else 'off'}")
     summary = evaluate(Path(args.manifest), images_dir, Path(args.out), args.use_reference)
     print_summary(summary, Path(args.out))
 

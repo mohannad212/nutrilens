@@ -18,8 +18,10 @@ detections and assert the wrapper's own logic:
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from app.ml.portion import PortionEstimator, describe_scale_source
@@ -116,7 +118,7 @@ def test_reference_beats_container_when_both_present():
         def classify(self, image):
             return ("dinner_plate", 0.9)
 
-        def rim_area_px(self, image):
+        def rim_area_px(self, image, food_mask=None):
             return 150_000.0
 
     det = CocoReferenceDetector(_stub_detect_fn([("fork", 0.9, (0, 0, 190, 0))]))
@@ -124,3 +126,169 @@ def test_reference_beats_container_when_both_present():
     r = est.estimate(_img(), "pizza", mask=np.ones((IMG_H, IMG_W), dtype=bool))
     assert r.method == "reference_object"
     assert r.reference == "fork"
+
+
+# ------------------ §2: the reference table must not overpromise ----------------
+def test_reference_table_lists_only_detectable_classes():
+    """`REFERENCE_SIZES` must contain nothing the pipeline cannot actually detect.
+
+    The table originally carried all 8 references from `05 §4` while only 3 were
+    reachable. A lookup entry that no detector can ever emit is not a harmless
+    stub — it reads as a working feature to anyone auditing the code, and it is
+    the kind of claim a report reader checks. Detectable now means: the COCO
+    detector's cutlery, plus `credit_card` via the geometric card detector.
+    """
+    from app.ml.portion import reference_sizes as rs
+    from app.ml.portion.reference_detector import DEFAULT_COCO_TO_REFERENCE
+
+    detectable = set(DEFAULT_COCO_TO_REFERENCE.values()) | {"credit_card"}
+    assert set(rs.REFERENCE_SIZES) == detectable
+
+
+def test_unimplemented_references_are_documented_but_unreachable():
+    """The rejected references stay documented, but can never resolve a scale."""
+    from app.ml.portion import reference_sizes as rs
+
+    assert set(rs.UNIMPLEMENTED_REFERENCES) == {"smartphone", "coin", "chopsticks", "hand"}
+    for name, (size, reason) in rs.UNIMPLEMENTED_REFERENCES.items():
+        # The research is retained...
+        assert size.real_cm > 0 and len(reason) > 40, name
+        # ...but the lookup path cannot reach it, so no scale can come from one.
+        assert rs.size_for(name) is None, name
+    assert rs.best_reference(["hand", "coin", "smartphone"]) is None
+
+
+# ------------------- §1: credit-card reference detector -------------------------
+def _card_image(long_px, size=(1200, 900), bg=(90, 95, 100), fill=(235, 235, 240), at=(60, 60)):
+    """A flat pasted ID-1-ratio rectangle on a plain field.
+
+    The canvas is deliberately large relative to the card: rule 1 rejects any
+    candidate over 8% of the frame area (at that size it is the table or the
+    plate, not a card beside a meal), so a cramped test canvas would fail the
+    detector for the wrong reason.
+    """
+    from PIL import ImageDraw
+
+    from app.ml.portion.reference_detector import CARD_RATIO
+
+    img = Image.new("RGB", size, bg)
+    x, y = at
+    short = round(long_px / CARD_RATIO)
+    ImageDraw.Draw(img).rectangle([x, y, x + long_px, y + short], fill=fill)
+    return img
+
+
+def test_card_ratio_is_the_iso_figure():
+    """85.60 x 53.98 mm (ISO/IEC 7810 ID-1) — the value the whole detector keys on."""
+    from app.ml.portion.reference_detector import CARD_LONG_MM, CARD_RATIO
+
+    assert CARD_LONG_MM == 85.60
+    assert CARD_RATIO == pytest.approx(1.5857, abs=1e-4)
+
+
+def test_card_detector_measures_the_long_edge():
+    """A card of known pixel size is measured to within a few percent."""
+    from app.ml.portion.reference_detector import CardReferenceDetector
+
+    det = CardReferenceDetector()
+    found = det.detect(_card_image(200))
+    assert found, "a clean 200 px card must be detected"
+    cls, px = found[0]
+    assert cls == "credit_card"
+    assert px == pytest.approx(200, rel=0.05)
+
+
+def test_card_below_the_pixel_floor_is_rejected():
+    """Under 80 px a card is too coarse to be a useful ruler — and is where the
+    false positives live. Rejecting is correct: the pipeline falls to the next rung."""
+    from app.ml.portion.reference_detector import CardReferenceDetector
+
+    assert CardReferenceDetector().detect(_card_image(60)) == []
+
+
+def test_non_card_rectangle_is_rejected():
+    """A rectangle of the wrong aspect ratio must not be read as a card.
+
+    This is the failure that matters: at a 12% tolerance a kitchen scale's
+    display panel (ratio 1.42) was accepted in a real photo, which would have
+    produced a confidently wrong scale. 1.42 must be rejected at the shipped 6%.
+    """
+    from PIL import ImageDraw
+
+    from app.ml.portion.reference_detector import CardReferenceDetector
+
+    img = Image.new("RGB", (1200, 900), (90, 95, 100))
+    long_px = 200
+    short = round(long_px / 1.42)  # the kitchen-scale panel's measured ratio
+    ImageDraw.Draw(img).rectangle([60, 60, 60 + long_px, 60 + short], fill=(235, 235, 240))
+    assert CardReferenceDetector().detect(img) == []
+
+
+def test_card_detector_never_raises_on_junk_input():
+    """A detector failure must degrade to no-reference, never fail /recognise."""
+    from app.ml.portion.reference_detector import CardReferenceDetector
+
+    assert CardReferenceDetector().detect(Image.new("RGB", (4, 4), (0, 0, 0))) == []
+    assert CardReferenceDetector().detect(Image.new("L", (64, 64), 128)) == []
+
+
+def test_card_outranks_a_fork_when_both_are_present():
+    """Priority 1 vs 4: the exact 85.60 mm reference must win over an assumed 19 cm fork.
+
+    This is the point of §1 — the card sidesteps the fork's ~10% length variance
+    (and therefore ~20% mass error), so when both are in frame the card must be
+    the one that sets the scale.
+    """
+    from app.ml.portion.reference_detector import CompositeReferenceDetector
+
+    class Stub:
+        def __init__(self, dets):
+            self._d = dets
+
+        def detect(self, image):
+            return list(self._d)
+
+    composite = CompositeReferenceDetector(
+        [Stub([("credit_card", 200.0)]), Stub([("fork", 400.0)])]
+    )
+    est = PortionEstimator(reference_detector=composite)
+    r = est.estimate(Image.new("RGB", (640, 480)), "pizza", mask=np.ones((480, 640), bool))
+    assert r.method == "reference_object"
+    assert r.reference == "credit_card"
+
+
+def test_composite_survives_one_detector_failing():
+    """A broken detector must not silence the working one."""
+    from app.ml.portion.reference_detector import CompositeReferenceDetector
+
+    class Boom:
+        def detect(self, image):
+            raise RuntimeError("model gone")
+
+    class Ok:
+        def detect(self, image):
+            return [("fork", 300.0)]
+
+    assert CompositeReferenceDetector([Boom(), Ok()]).detect(Image.new("RGB", (64, 64))) == [
+        ("fork", 300.0)
+    ]
+
+
+def test_card_detector_finds_no_card_in_the_weighed_photos():
+    """Regression lock on the false-positive audit (scripts/card_fp_audit.py).
+
+    Every weighed photo is a negative — none contains a card. A detection here
+    means a threshold was loosened and a confidently wrong ruler is back.
+    """
+    from app.config import settings
+    from app.ml.portion.reference_detector import CardReferenceDetector
+
+    images = Path(__file__).resolve().parents[1] / "data" / "weighed" / "images"
+    photos = sorted(images.glob("*.jpg"))
+    if not photos:
+        pytest.skip("weighed image set not present")
+    det = CardReferenceDetector(
+        ratio_tol=settings.card_ratio_tol, min_long_px=settings.card_min_long_px
+    )
+    for p in photos:
+        assert det.detect(Image.open(p)) == [], f"false positive on {p.name}"

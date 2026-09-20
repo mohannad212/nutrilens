@@ -152,3 +152,189 @@ def load_coco_reference_detector(device: str, score_threshold: float) -> CocoRef
     categories: list[str] = weights.meta["categories"]  # COCO names, index-aligned
     detect_fn = _make_torchvision_detect_fn(model, categories, torch.device(device))
     return CocoReferenceDetector(detect_fn, score_threshold=score_threshold)
+
+
+# =============================================================================
+# Credit-card reference detector (backlog §1) — classical geometry, no training
+# =============================================================================
+# WHY A SECOND DETECTOR RATHER THAN A CLASS ON THE FIRST.
+# A fork needs ML because it is a *shape* — there is no closed-form description of
+# "fork". A card is the opposite: a rigid rectangle whose aspect ratio is fixed by
+# standard. COCO has no card class and training one would need a dataset, when
+# `approxPolyDP` + `minAreaRect` already describe the object exactly.
+#
+# WHY IT IS WORTH THE TROUBLE. It is the only *exact* reference available:
+#   card  85.60 mm, ISO/IEC 7810 ID-1, zero variance, every bank card on earth
+#   fork  19 cm ASSUMED; real forks run 17-21 cm -> ~10% length variance, and
+#         since mass scales with area that is ~20% mass error.
+# That is why `reference_sizes.py` ranks `credit_card` priority 1 and `fork` 4.
+#
+# THE WHOLE ENGINEERING PROBLEM IS FALSE POSITIVES. A wrongly-detected card is a
+# confidently wrong ruler, which is strictly worse than no ruler at all (the
+# pipeline degrades honestly to a wider band when Stage 2 finds nothing). The two
+# thresholds below are what buy that safety, and both were measured, not guessed:
+#   * ratio tolerance 6% (not 12%). At 12% the kitchen scale's display panel
+#     (ratio 1.42) was detected as a card in the donut photo.
+#   * min long edge 80 px. Below that a card is too few pixels to be a useful
+#     ruler anyway, and small ragged quadrilaterals are where the false positives
+#     live.
+# At 6% + 80 px the prototype found ZERO false positives across the weighed set.
+#
+# KNOWN LIMIT — READ BEFORE TRUSTING THIS. The tolerance was validated against a
+# *pasted flat rectangle*, not a photographed card. A real card has rounded
+# corners, glare, shadow and perspective skew, all of which push the apparent
+# ratio off 1.5857; a tilted card's projected ratio is off by 1/cos(theta) in one
+# axis. So this detector is expected to MISS tilted real cards rather than
+# hallucinate them — which is the correct direction to fail, but it means the hit
+# rate is unproven on real photos. Do not loosen `ratio_tol` to raise that hit
+# rate without re-running the false-positive check over the whole weighed set:
+# loosening is exactly what brought the kitchen scale back.
+
+CARD_LONG_MM, CARD_SHORT_MM = 85.60, 53.98
+CARD_RATIO = CARD_LONG_MM / CARD_SHORT_MM  # 1.5857...
+
+
+class CardReferenceDetector:
+    """`ReferenceDetector` protocol impl: finds an ID-1 card by geometry alone.
+
+    Emits `[("credit_card", long_edge_px)]` — `reference_sizes.py` maps that key to
+    8.56 cm. Returns `[]` on anything it is not sure about, and never raises: a
+    missing card must degrade to the next scale rung, never fail `/recognise`.
+    """
+
+    def __init__(
+        self,
+        ratio_tol: float = 0.06,
+        min_long_px: float = 80.0,
+        min_frac: float = 0.0008,
+        max_frac: float = 0.08,
+        solidity_min: float = 0.90,
+    ):
+        self.ratio_tol = ratio_tol
+        self.min_long_px = min_long_px
+        self.min_frac = min_frac
+        self.max_frac = max_frac
+        self.solidity_min = solidity_min
+
+    def detect(self, image: Image.Image) -> list[tuple[str, float]]:
+        cards = self.find_cards(image)
+        if not cards:
+            return []
+        # If several survive, the largest is the best ruler (most pixels across
+        # the known 8.56 cm = the smallest relative measurement error).
+        return [("credit_card", cards[0]["long_px"])]
+
+    def find_cards(self, image: Image.Image) -> list[dict]:
+        """Candidate cards, largest first. Each dict carries `long_px` and `ratio`.
+
+        Separate from `detect` so the false-positive audit script can inspect
+        *why* something was accepted, not just that it was.
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            bgr = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        except Exception:
+            return []
+
+        try:
+            h, w = bgr.shape[:2]
+            frame = float(h * w)
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            # Bilateral (not Gaussian): smooths surface texture — granite speckle,
+            # tablecloth weave — while keeping the card's straight edges sharp,
+            # which is the one feature the whole detector depends on.
+            gray = cv2.bilateralFilter(gray, 9, 75, 75)
+
+            found: list[dict] = []
+            # Three Canny settings: a card may be lighter or darker than the
+            # surface it sits on, and one threshold pair misses the low-contrast
+            # case (a white card on a white counter).
+            for lo, hi in ((30, 90), (50, 150), (75, 200)):
+                edges = cv2.Canny(gray, lo, hi)
+                # Close 1-2 px gaps so a card outline broken by glare still forms
+                # a single closed contour.
+                edges = cv2.morphologyEx(
+                    edges,
+                    cv2.MORPH_CLOSE,
+                    cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+                )
+                contours, _ = cv2.findContours(
+                    edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+                )
+                for c in contours:
+                    cand = self._as_card(c, frame, cv2, np)
+                    if cand is not None:
+                        found.append(cand)
+
+            # The three edge settings usually find the same card three times.
+            deduped: list[dict] = []
+            for d in sorted(found, key=lambda d: -d["area_px"]):
+                if all(
+                    abs(d["long_px"] - k["long_px"]) / k["long_px"] > 0.15
+                    for k in deduped
+                ):
+                    deduped.append(d)
+            return deduped
+        except Exception:
+            return []
+
+    def _as_card(self, contour, frame_area: float, cv2, np) -> dict | None:
+        """Accept one contour as a card, or None. Every rejection is a named rule."""
+        area = cv2.contourArea(contour)
+        # Rule 1: plausible size in frame. Too small is noise; too large is the
+        # table, the plate, or the frame border itself.
+        if not (self.min_frac * frame_area <= area <= self.max_frac * frame_area):
+            return None
+        # Rule 2: it must actually be a quadrilateral, and convex — a card is.
+        peri = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            return None
+        # Rule 3: solidity — guards against ragged edge fragments that happen to
+        # simplify to four vertices but enclose a much smaller real area.
+        hull_area = cv2.contourArea(cv2.convexHull(approx))
+        if hull_area <= 0 or area / hull_area < self.solidity_min:
+            return None
+        (cx, cy), (rw, rh), ang = cv2.minAreaRect(approx)
+        long_px, short_px = max(rw, rh), min(rw, rh)
+        # Rule 4: big enough to be a useful ruler. This is the threshold that
+        # killed the remaining false positives (see the header note).
+        if long_px < self.min_long_px or short_px <= 0:
+            return None
+        # Rule 5: the ISO aspect ratio, within a deliberately tight tolerance.
+        ratio = long_px / short_px
+        if abs(ratio - CARD_RATIO) / CARD_RATIO > self.ratio_tol:
+            return None
+        return {
+            "long_px": float(long_px),
+            "short_px": float(short_px),
+            "ratio": float(ratio),
+            "area_px": float(area),
+            "center": (float(cx), float(cy)),
+            "angle": float(ang),
+        }
+
+
+class CompositeReferenceDetector:
+    """Runs several reference detectors and concatenates their detections.
+
+    The estimator already ranks whatever it is handed by `reference_sizes`
+    priority (card 1 > cutlery 4) and averages a second reference in when the two
+    agree, so this needs no ranking logic of its own — it only has to make both
+    detectors' output reach `_reference_scale` in one list. One failing detector
+    must not silence the others, hence the per-detector guard.
+    """
+
+    def __init__(self, detectors: list) -> None:
+        self.detectors = detectors
+
+    def detect(self, image: Image.Image) -> list[tuple[str, float]]:
+        out: list[tuple[str, float]] = []
+        for d in self.detectors:
+            try:
+                out.extend(d.detect(image))
+            except Exception:
+                continue
+        return out

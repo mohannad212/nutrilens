@@ -156,11 +156,15 @@ class ContainerModel(Protocol):
     def classify(self, image: Image.Image) -> tuple[str, float]:
         """Return `(container_class, confidence)`."""
 
-    def rim_area_px(self, image: Image.Image) -> float | None:
+    def rim_area_px(
+        self, image: Image.Image, food_mask: np.ndarray | None = None
+    ) -> float | None:
         """Return the container rim's enclosed area in pixels, or None.
 
         Area (not a single axis) so the scale derivation is shape-agnostic —
         square and rectangular containers work, not only round plates.
+        `food_mask` (optional) lets the detector validate that a rim candidate
+        actually contains the food — see `RimAreaDetector` rule 3.
         """
 
 
@@ -208,22 +212,67 @@ class PortionEstimator:
         Deterministic and side-effect-free (`05 §8`): decodes nothing to disk,
         writes nothing, and returns the same result for the same inputs.
         """
-        cm_per_px, method, reference, band = self._resolve_scale(image)
+        # Segment BEFORE resolving scale: the container rung validates its rim
+        # candidate against the food mask (a container must contain its food),
+        # which is what stops a food blob being mistaken for the plate when the
+        # plate doesn't separate from the background (white plate, light table).
         region = mask if mask is not None else self._segment(image)
+        cm_per_px, method, reference, band, tilt, rim_area_px = self._resolve_scale(
+            image, region
+        )
         area_cm2 = self._area(region, cm_per_px)
-        volume_cm3 = self._volume(food_class, area_cm2)
+
+        # Tall-food tilt correction. The area-based scale is self-correcting for
+        # camera tilt when the food is FLAT: plate and food foreshorten by the
+        # same cos θ, and √(A_real/A_px) absorbs it. A tall mound breaks that —
+        # its projected silhouette (side + top) barely shrinks with tilt, so its
+        # area is over-recovered by ~1/cos θ. The rim ellipse's axis ratio IS
+        # cos θ (a round plate at tilt θ projects an ellipse with exactly that
+        # ratio), so multiplying the area back by it de-foreshortens tall
+        # classes. Applied only to mound models (ELLIPSOID/DOME) under a
+        # container scale; flat models need no correction and shape-only has no
+        # tilt measurement. Measured on a weighed 203 g donut plate at ~60°:
+        # uncorrected 337 g, corrected 167 g.
+        prior = shape_priors.prior_for(food_class)
+        if prior.model in (shape_priors.ShapeModel.ELLIPSOID, shape_priors.ShapeModel.DOME):
+            area_cm2 *= tilt
+
+        # §3: a bowl's fill depth, derived from the rim/surface area ratio rather
+        # than assumed from a per-class constant. Requires a measured rim, so it
+        # only ever applies under a container scale; off by default until there
+        # are weighed bowls to validate it against (see `shape_priors`).
+        h_override: float | None = None
+        if (
+            settings.portion_derive_bowl_depth
+            and prior.model is shape_priors.ShapeModel.LIQUID_IN_BOWL
+            and rim_area_px
+        ):
+            h_override = shape_priors.derived_fill_depth_cm(
+                rim_area_px * (cm_per_px**2), area_cm2
+            )
+
+        volume_cm3 = self._volume(food_class, area_cm2, h_override=h_override)
         mass = volume_cm3 * density_of(food_class)
         mass = shape_priors.clamp_mass(food_class, mass)
 
         # `band` is a multiplicative (lo, hi) on mass whose width reflects the
         # governing scale stage — symmetric for reference/shape-only, and the
-        # range-derived asymmetric band for a container prior (`05 §3/§4`). Clamp
-        # the bounds to the class's plausible range so the band can't run off into
-        # physically impossible masses.
+        # range-derived asymmetric band for a container prior (`05 §3/§4`).
+        #
+        # The band is taken around the *clamped* point and deliberately not
+        # re-clamped itself. `clamp_mass` guards the point estimate against bad
+        # geometry (a mask that leaked onto the plate); the band is a statement
+        # about how uncertain that point is. Clamping both collapsed the interval
+        # whenever the point pinned to a bound — `min_g == point_g` at the floor,
+        # `max_g == point_g` at the ceiling — which reads as certainty exactly
+        # where the pipeline is least sure, and breaks the `05 §1` contract that
+        # an estimate is always a range. Found when a weighed 169 g fries plate
+        # pinned to a clamp; the ceiling case was latent long before that, worked
+        # around in the tests by hand-picking mask sizes that avoid the bounds.
         lo, hi = band
         return PortionEstimate(
-            min_g=round(shape_priors.clamp_mass(food_class, mass * lo), 1),
-            max_g=round(shape_priors.clamp_mass(food_class, mass * hi), 1),
+            min_g=round(mass * lo, 1),
+            max_g=round(mass * hi, 1),
             point_g=round(mass, 1),
             method=method,
             reference=reference,
@@ -231,32 +280,38 @@ class PortionEstimator:
 
     # ---------------------------- Stage 1 + 2 --------------------------------
     def _resolve_scale(
-        self, image: Image.Image
-    ) -> tuple[float, PortionMethod, str | None, tuple[float, float]]:
+        self, image: Image.Image, food_mask: np.ndarray | None = None
+    ) -> tuple[float, PortionMethod, str | None, tuple[float, float], float, float | None]:
         """Resolve cm-per-pixel from the best available cue (05 §4 priority).
 
         Order: reference object (tightest) → container prior → shape-only framing
-        heuristic (widest). Returns `(cm_per_px, method, reference, band)` where
-        `band` is the multiplicative `(lo, hi)` mass-uncertainty for that stage.
+        heuristic (widest). Returns `(cm_per_px, method, reference, band, tilt)`:
+        `band` is the multiplicative `(lo, hi)` mass-uncertainty for that stage;
+        `tilt` is the rim's projected axis ratio (≈cos of the camera tilt, 1.0
+        when unmeasured) used by the tall-food correction in `estimate`;
+        `rim_area_px` is the container's enclosed pixel area when Stage 1 measured
+        one (None otherwise), which is what the §3 bowl-depth derivation needs.
         """
         # Stage 2 — reference object (strongest signal, tight symmetric band).
         ref_scale = self._reference_scale(image)
         if ref_scale is not None:
             cm_per_px, ref_class = ref_scale
             eps = settings.portion_eps_reference
-            return cm_per_px, "reference_object", ref_class, (1.0 - eps, 1.0 + eps)
+            return (
+                cm_per_px, "reference_object", ref_class, (1.0 - eps, 1.0 + eps), 1.0, None,
+            )
 
         # Stage 1 — container size prior (band derived from its size range).
-        container_scale = self._container_scale(image)
+        container_scale = self._container_scale(image, food_mask)
         if container_scale is not None:
-            cm_per_px, container_class, band = container_scale
-            return cm_per_px, "container_prior", container_class, band
+            cm_per_px, container_class, band, tilt, rim_area_px = container_scale
+            return cm_per_px, "container_prior", container_class, band, tilt, rim_area_px
 
         # Fallback — device-normalised framing heuristic (05 §4 last resort).
         width_px = image.size[0]
         cm_per_px = settings.portion_shape_only_frame_width_cm / max(width_px, 1)
         eps = settings.portion_eps_shape_only
-        return cm_per_px, "shape_only", None, (1.0 - eps, 1.0 + eps)
+        return cm_per_px, "shape_only", None, (1.0 - eps, 1.0 + eps), 1.0, None
 
     def _reference_scale(self, image: Image.Image) -> tuple[float, str] | None:
         """Stage 2 scale from a detected reference object, or None (05 §4).
@@ -296,7 +351,9 @@ class PortionEstimator:
                 scale = (scale + s2) / 2.0
         return scale, best
 
-    def _container_scale(self, image: Image.Image) -> tuple[float, str, tuple[float, float]] | None:
+    def _container_scale(
+        self, image: Image.Image, food_mask: np.ndarray | None = None
+    ) -> tuple[float, str, tuple[float, float], float, float] | None:
         """Stage 1 scale + uncertainty band from the container prior, or None (05 §3).
 
         Scale is **area-based** — `cm_per_px = √(A_real / A_px)` — so it is
@@ -308,17 +365,33 @@ class PortionEstimator:
         """
         if self.container_model is None:
             return None
-        container_class, _conf = self.container_model.classify(image)
+        container_class, conf = self.container_model.classify(image)
         prior = container_priors.prior_for(container_class)
         if not container_priors.has_scale(prior):
             return None
-        area_px = self.container_model.rim_area_px(image)
+        # Prefer the ellipse variant (area + tilt); duck-typed fallback keeps
+        # older/stub container models (area-only) working with tilt = 1.0.
+        rim_ellipse = getattr(self.container_model, "rim_ellipse", None)
+        if rim_ellipse is not None:
+            found = rim_ellipse(image, food_mask=food_mask)
+            if found is None:
+                return None
+            area_px, tilt = found
+        else:
+            area_px = self.container_model.rim_area_px(image, food_mask=food_mask)
+            tilt = 1.0
         if area_px is None or area_px <= 0:
             return None
         real_area = container_priors.real_area_cm2(prior, "typical")
         cm_per_px = math.sqrt(real_area / area_px)
-        band = container_priors.uncertainty_band(prior)
-        return cm_per_px, container_class, band
+        # The size range gives the band for a *correctly identified* container.
+        # The classifier is also the thing most likely to be wrong (a bowl read as
+        # a plate is 2.25x in mass), so its residual doubt widens the band on top
+        # of that — free when it is confident, visibly wider when it is not.
+        band = container_priors.widen_for_confidence(
+            container_priors.uncertainty_band(prior), conf
+        )
+        return cm_per_px, container_class, band, max(0.3, min(float(tilt), 1.0)), area_px
 
     # ------------------------- segmentation (§6) -----------------------------
     def _segment(self, image: Image.Image) -> np.ndarray:
@@ -389,7 +462,13 @@ class PortionEstimator:
         return pixel_count * (cm_per_px**2)
 
     @staticmethod
-    def _volume(food_class: str, area_cm2: float) -> float:
-        """Volume in cm³ from the class's shape prior (`05 §5`)."""
+    def _volume(food_class: str, area_cm2: float, h_override: float | None = None) -> float:
+        """Volume in cm³ from the class's shape prior (`05 §5`).
+
+        `h_override` replaces the class's height prior with a *measured* one — used
+        only by the §3 bowl-depth derivation, where the fill depth is computed from
+        the container rim rather than assumed.
+        """
         prior = shape_priors.prior_for(food_class)
-        return shape_priors.volume_cm3(prior.model, area_cm2, prior.h, prior.k)
+        h = prior.h if h_override is None else h_override
+        return shape_priors.volume_cm3(prior.model, area_cm2, h, prior.k)

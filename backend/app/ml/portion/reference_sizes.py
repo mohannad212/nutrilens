@@ -30,7 +30,12 @@ HOW IT WORKS INTERNALLY
 - `priority` encodes the reliability order from `05 §4`
   (`credit_card > smartphone > coin > fork/spoon/knife > chopsticks > hand`);
   lower number = more reliable. `best_reference()` picks the most reliable
-  reference among those actually detected.
+  reference among those actually detected. The priority integers are left at
+  their `05 §4` values rather than renumbered 1..n, so the gaps (2, 3, 5, 6) are
+  visible evidence of the classes that were considered and rejected.
+- **`REFERENCE_SIZES` contains only what a detector can actually emit.** The
+  researched-but-unbuilt references live in `UNIMPLEMENTED_REFERENCES` with a
+  stated reason and are never consulted at lookup time.
 - `size_for()` is a non-raising accessor (returns `None` for unknown labels) so a
   detector that emits a class we don't model can't crash the pipeline.
 
@@ -50,6 +55,13 @@ Q: "Why is the credit card the most reliable reference?"
 A: Its long edge is standardised worldwide to 8.56 cm (ISO/IEC 7810 ID-1), so
    there is essentially zero size variance — unlike a hand (varies per person) or
    a coin (varies per region/denomination).
+
+Q: "The table lists 4 references — `05 §4` described 8. Where did they go?"
+A: Only 4 are detectable, so only 4 are listed. `smartphone`, `coin`,
+   `chopsticks` and `hand` are in `UNIMPLEMENTED_REFERENCES` with the reason each
+   was rejected (variance, region-dependence, or too few pixels to measure).
+   Advertising a reference no detector can emit would be a lookup table that
+   silently never fires — worse than an honest gap, because it reads as working.
 
 Q: "Two references are in frame and disagree — what happens?"
 A: `05 §4`: use the highest-priority one; if the next agrees within 15% average
@@ -72,17 +84,52 @@ class ReferenceSize:
 
 
 # Known real-world dimensions from `05 §4`. `priority` encodes the reliability
-# order stated there: credit_card > smartphone > coin > fork/spoon/knife >
-# chopsticks > hand (lower number = prefer it when several are detected).
+# order stated there (lower number = prefer it when several are detected).
+#
+# THIS TABLE LISTS ONLY REFERENCES A DETECTOR CAN ACTUALLY PRODUCE.
+# It used to carry all 8 classes of `05 §4`, of which only 3 were reachable —
+# `fork`/`spoon`/`knife` via the COCO detector. `credit_card`, `smartphone`,
+# `coin`, `chopsticks` and `hand` could never fire, so the module advertised
+# capability the pipeline did not have. Anything not detectable now lives in
+# `UNIMPLEMENTED_REFERENCES` below with the reason it is absent, which keeps the
+# physics research visible without letting it masquerade as a feature.
 REFERENCE_SIZES: dict[str, ReferenceSize] = {
+    # Geometric detector (`reference_detector.CardReferenceDetector`) — exact size.
     "credit_card": ReferenceSize(8.56, "long edge", 1),  # ISO/IEC 7810 ID-1
-    "smartphone": ReferenceSize(14.7, "long edge", 2),  # configurable per device
-    "coin": ReferenceSize(2.4, "diameter", 3),  # default US quarter
+    # COCO instance-detection classes.
     "fork": ReferenceSize(19.0, "length", 4),  # Western table fork
     "spoon": ReferenceSize(18.0, "length", 4),  # tablespoon
     "knife": ReferenceSize(21.0, "length", 4),  # table knife
-    "chopsticks": ReferenceSize(24.0, "length", 5),
-    "hand": ReferenceSize(8.4, "width across knuckles", 6),  # weakest
+}
+
+# References researched in `05 §4` but deliberately NOT implemented, each with the
+# reason. Kept as documentation, not as a lookup: `size_for()` and
+# `best_reference()` do not consult this dict, so a detector cannot accidentally
+# resolve a scale from one. Values are retained so that if a detector is ever
+# built, the measured dimension is already recorded.
+UNIMPLEMENTED_REFERENCES: dict[str, tuple[ReferenceSize, str]] = {
+    "smartphone": (
+        ReferenceSize(14.7, "long edge", 2),
+        "Phone sizes vary by 20%+ across models and the photo cannot tell you "
+        "which model it is. The COCO `cell phone` class is deliberately skipped "
+        "in the reference detector for the same reason.",
+    ),
+    "coin": (
+        ReferenceSize(2.4, "diameter", 3),
+        "Diameter is country- and denomination-specific, so it needs a "
+        "classifier per region; and at ~2.4 cm a coin is usually too few pixels "
+        "across to measure precisely enough to be worth the error it adds.",
+    ),
+    "chopsticks": (
+        ReferenceSize(24.0, "length", 5),
+        "Not a COCO class, and length varies (and a pair crossed at an angle "
+        "gives no single reliable span).",
+    ),
+    "hand": (
+        ReferenceSize(8.4, "width across knuckles", 6),
+        "Knuckle width varies hugely between people — the weakest reference in "
+        "`05 §4` and the one most likely to be confidently wrong.",
+    ),
 }
 
 

@@ -80,6 +80,17 @@ def _radius_from_area(area_cm2: float) -> float:
     return math.sqrt(max(area_cm2, 0.0) / math.pi)
 
 
+# Ceiling on an IRREGULAR_PILE's effective height (cm). `h_eff = k·√A` captures
+# that a growing pile both spreads and mounds, but real plated food slumps: an
+# *average* depth beyond ~5 cm across the whole footprint does not happen on a
+# plate. Without the cap mass scales as A^1.5 all the way up, so a generous mask
+# on a wide serving blows straight past the class clamp (a 250 cm² plate of
+# fries read 870 g raw). The cap restores linear scaling for large footprints
+# while leaving small/medium piles (h_eff below the cap) untouched — the weighed
+# 275 g wings plate (h_eff 3.8 cm) is unaffected.
+PILE_MAX_HEIGHT_CM = 5.0
+
+
 def volume_cm3(model: ShapeModel, area_cm2: float, h: float, k: float) -> float:
     """Volume (cm³) for a shape model given footprint area, height prior h, heap k.
 
@@ -99,7 +110,8 @@ def volume_cm3(model: ShapeModel, area_cm2: float, h: float, k: float) -> float:
     if model is ShapeModel.CYLINDER:
         return math.pi * r * r * h  # standing cylinder, footprint radius r
     if model is ShapeModel.IRREGULAR_PILE:
-        h_eff = k * math.sqrt(area_cm2)  # heaps taller as it spreads
+        # Heaps taller as it spreads — but slumps: see PILE_MAX_HEIGHT_CM.
+        h_eff = min(k * math.sqrt(area_cm2), PILE_MAX_HEIGHT_CM)
         return area_cm2 * h_eff
     if model is ShapeModel.LIQUID_IN_BOWL:
         # No container volume without Stage 1 — approximate the fill as a shallow
@@ -206,11 +218,18 @@ SHAPE_PRIORS: dict[str, ShapePrior] = {
     "croque_madame": ShapePrior(
         ShapeModel.FLAT_DISC, h=3.5, k=0.0, clamp_min_g=120.0, clamp_max_g=500.0
     ),
-    # domes / scoops
+    # scoops — ELLIPSOID, not DOME. DOME ignores `h` and builds a hemisphere
+    # from the footprint radius, so its height grows unboundedly with footprint
+    # (V ∝ A^1.5) — the same disease the guacamole fix removed. A 150 cm² spread
+    # of mashed potato was 622 g under DOME (pinned past its own clamp);
+    # a scoop's real height is bounded, so mass must scale linearly with area.
+    # These two were the last remaining DOME classes.
     "mashed_potatoes": ShapePrior(
-        ShapeModel.DOME, h=4.0, k=0.0, clamp_min_g=80.0, clamp_max_g=500.0
+        ShapeModel.ELLIPSOID, h=4.0, k=0.0, clamp_min_g=80.0, clamp_max_g=500.0
     ),
-    "ice_cream": ShapePrior(ShapeModel.DOME, h=4.0, k=0.0, clamp_min_g=40.0, clamp_max_g=350.0),
+    "ice_cream": ShapePrior(
+        ShapeModel.ELLIPSOID, h=4.5, k=0.0, clamp_min_g=40.0, clamp_max_g=350.0
+    ),
     "guacamole": ShapePrior(
         ShapeModel.LIQUID_IN_BOWL, h=1.8, k=0.0, clamp_min_g=40.0, clamp_max_g=300.0
     ),
@@ -263,7 +282,10 @@ SHAPE_PRIORS: dict[str, ShapePrior] = {
     "bruschetta": ShapePrior(
         ShapeModel.FLAT_DISC, h=2.0, k=0.0, clamp_min_g=40.0, clamp_max_g=300.0
     ),
-    "donuts": ShapePrior(ShapeModel.ELLIPSOID, h=3.5, k=0.0, clamp_min_g=40.0, clamp_max_g=300.0),
+    # h=4.5, not 3.5: a glazed/frosted ring donut stands ~4.5 cm. Measured on a
+    # weighed 203 g two-donut plate (2026-08 audit): h=3.5 read 155-174 g across
+    # two photos/scale methods (consistently ~-20%); 4.5 lands 199-224 g.
+    "donuts": ShapePrior(ShapeModel.ELLIPSOID, h=4.5, k=0.0, clamp_min_g=40.0, clamp_max_g=300.0),
     # ellipsoids (round-ish discrete items)
     "apple_pie": ShapePrior(
         ShapeModel.ELLIPSOID, h=3.5, k=0.0, clamp_min_g=80.0, clamp_max_g=350.0
@@ -364,8 +386,19 @@ SHAPE_PRIORS: dict[str, ShapePrior] = {
     "macaroni_and_cheese": ShapePrior(
         ShapeModel.FLAT_DISC, h=2.5, k=0.0, clamp_min_g=100.0, clamp_max_g=600.0
     ),
+    # `spaghetti_carbonara`/`spaghetti_bolognese` used to be the exceptions to this
+    # section's own rule, filed as IRREGULAR_PILE (bolognese even sat elsewhere,
+    # grouped with french_fries/salads). IRREGULAR_PILE's h = k·sqrt(A) makes
+    # volume — and therefore mass — scale as A^1.5, so it punishes any real
+    # footprint hard: a weighed 316 g bolognese plate (area a correctly-measured
+    # 199 cm2) came out 957 g raw, clamped to 700. A tangled spaghetti swirl on a
+    # plate is not meaningfully taller than ravioli or gnocchi next to it — it
+    # gets the same FLAT_DISC treatment as everything else here.
     "spaghetti_carbonara": ShapePrior(
-        ShapeModel.IRREGULAR_PILE, h=1.2, k=0.20, clamp_min_g=120.0, clamp_max_g=600.0
+        ShapeModel.FLAT_DISC, h=1.8, k=0.0, clamp_min_g=100.0, clamp_max_g=550.0
+    ),
+    "spaghetti_bolognese": ShapePrior(
+        ShapeModel.FLAT_DISC, h=1.8, k=0.0, clamp_min_g=100.0, clamp_max_g=600.0
     ),
     "risotto": ShapePrior(ShapeModel.FLAT_DISC, h=2.0, k=0.0, clamp_min_g=100.0, clamp_max_g=600.0),
     "paella": ShapePrior(ShapeModel.FLAT_DISC, h=2.5, k=0.0, clamp_min_g=150.0, clamp_max_g=700.0),
@@ -409,24 +442,41 @@ SHAPE_PRIORS: dict[str, ShapePrior] = {
     "beet_salad": ShapePrior(
         ShapeModel.IRREGULAR_PILE, h=1.2, k=0.28, clamp_min_g=60.0, clamp_max_g=450.0
     ),
-    # irregular piles (heaped, spreading)
+    # `french_fries` moved off IRREGULAR_PILE (2026-08-30, weighed 169 g plate).
+    # Same failure as the bolognese/fried-rice pair below, but reached from the
+    # other end: at k=0.4, `h_eff = k·√A` hits PILE_MAX_HEIGHT_CM for any area
+    # over ~156 cm², so a normal plated serving was modelled as a uniform 5 cm
+    # deep heap. Measured: a 169 g plate segmented at 176 cm² (fork-calibrated)
+    # and 246 cm² (plate prior, camera tilted) read 484 g and 677 g — the latter
+    # clipped to the 500 g clamp, which hid a 4.0x error as a 3.0x one. Fries
+    # spread; they do not mound to 5 cm.
+    #
+    # `h` is the *effective* uniform depth, and the density (0.55) already
+    # accounts for the air between fries. The two shots of the same weighed
+    # plate bracket it — 1.75 cm from the fork rung, 1.25 cm from the tilted
+    # plate rung, the spread being camera tilt on a food that is not flat enough
+    # to self-correct. 1.5 cm splits them (-14% / +20%) rather than fitting
+    # either photo exactly; one weighed sample does not earn more precision.
     "french_fries": ShapePrior(
-        ShapeModel.IRREGULAR_PILE, h=1.2, k=0.4, clamp_min_g=60.0, clamp_max_g=500.0
+        ShapeModel.FLAT_DISC, h=1.5, k=0.0, clamp_min_g=60.0, clamp_max_g=500.0
     ),
+    # irregular piles (heaped, spreading)
     "caesar_salad": ShapePrior(
         ShapeModel.IRREGULAR_PILE, h=1.2, k=0.5, clamp_min_g=50.0, clamp_max_g=500.0
     ),
     "greek_salad": ShapePrior(
         ShapeModel.IRREGULAR_PILE, h=1.2, k=0.5, clamp_min_g=50.0, clamp_max_g=500.0
     ),
+    # `fried_rice` and `pad_thai` moved off IRREGULAR_PILE in the 2026-08 audit:
+    # plated grain/noodle spreads are the measured bolognese failure (A^1.5 made
+    # a weighed 316 g plate read 957 g). Fried rice mounds a little more than
+    # spaghetti, pad thai carries denser protein/sprouts — hence h above the
+    # 1.8 cm the spaghetti pair uses, but both are bounded layers, not piles.
     "fried_rice": ShapePrior(
-        ShapeModel.IRREGULAR_PILE, h=1.2, k=0.35, clamp_min_g=80.0, clamp_max_g=600.0
-    ),
-    "spaghetti_bolognese": ShapePrior(
-        ShapeModel.IRREGULAR_PILE, h=1.2, k=0.4, clamp_min_g=100.0, clamp_max_g=700.0
+        ShapeModel.FLAT_DISC, h=2.5, k=0.0, clamp_min_g=80.0, clamp_max_g=600.0
     ),
     "pad_thai": ShapePrior(
-        ShapeModel.IRREGULAR_PILE, h=1.2, k=0.4, clamp_min_g=100.0, clamp_max_g=650.0
+        ShapeModel.FLAT_DISC, h=2.0, k=0.0, clamp_min_g=100.0, clamp_max_g=650.0
     ),
     # liquids in a bowl
     "french_onion_soup": ShapePrior(
@@ -456,3 +506,70 @@ def clamp_mass(food_class: str, mass_g: float) -> float:
     """Clamp an estimated mass to the class's physically-plausible band (`05 §5`)."""
     prior = prior_for(food_class)
     return max(prior.clamp_min_g, min(mass_g, prior.clamp_max_g))
+
+
+# =============================================================================
+# §3 — deriving a bowl's fill DEPTH instead of assuming it
+# =============================================================================
+# THE PROBLEM. `LIQUID_IN_BOWL` models a fill as a disc of depth `h`, and `h` is a
+# per-class constant in the 1.5-2.5 cm range (with priors spanning 2.0-5.0). Depth
+# is the single weakest number in the whole pipeline, because it is genuinely
+# unobservable from a top-down photo and varies more than any other shape
+# parameter. It produced the worst measured error in the audit: a weighed 242 g
+# soup over a 155 cm² surface implies a real fill depth of **1.56 cm**, and had
+# that dish been classified as an actual soup class instead of `panna_cotta` the
+# pipeline would have computed **620 g — 2.6x over**.
+#
+# THE INSIGHT. Depth is unobservable *on its own*, but a bowl is tapered: less
+# liquid sits lower AND has a smaller surface. So the surface we can measure and
+# the depth we cannot are linked by the bowl's geometry, and the link needs no
+# new prior — only the ratio of two areas the pipeline already computes.
+#
+# THE GEOMETRY, WITH NO FREE CONSTANTS. Model the bowl as a hemispherical cap of
+# rim radius R. Liquid filled to depth d has surface radius r with
+#     r² = d(2R - d)
+# so the measurable fill ratio is
+#     fill_ratio = r²/R² = u(2 - u),   u = d/R
+# which inverts exactly to
+#     u = 1 - sqrt(1 - fill_ratio)  =>  d = R(1 - sqrt(1 - fill_ratio))
+# R comes from the container rim area (R = sqrt(A_rim/pi)) and `fill_ratio` from
+# food_area/rim_area — a ratio, so it is scale-free and works in pixels. There is
+# nothing here to tune: the model is fixed by the assumed bowl shape.
+#
+# WHY A HEMISPHERE AND NOT A CONE. A cone gives d = h·sqrt(fill_ratio), and the
+# two disagree sharply at the shallow fills that matter: on the one weighed bowl,
+# cone geometry predicts 2.63 cm where the hemisphere predicts ~2.0 cm against a
+# measured 1.56 cm. Real crockery is rounded, not conical, so the hemisphere is
+# both the better physical model and the better-behaved one — that is the reason
+# for the choice, not the 1 data point, which cannot settle anything on its own.
+#
+# STATUS: OFF BY DEFAULT, AND HONESTLY SO. This is `05 §3`-blocked on a reliable
+# container rim, and §4 (the attempt to supply one) failed its own measurement.
+# The only weighed bowl has no rim from the Otsu detector at all, so the 2.0 cm
+# figure above was computed from the §4 growth rim — a rim that did not survive
+# validation. So the mechanism is implemented and unit-tested on its geometry,
+# and is NOT enabled: it awaits the two or three more weighed bowls (one shallow,
+# one full) that the backlog asks for. Do not enable it to make the soup photo
+# come out right. n=1.
+
+MIN_DERIVED_FILL_DEPTH_CM = 0.5
+MAX_DERIVED_FILL_DEPTH_CM = 8.0
+
+
+def derived_fill_depth_cm(rim_area_cm2: float, food_area_cm2: float) -> float | None:
+    """Fill depth (cm) of a hemispherical bowl from its rim and surface areas.
+
+    `d = R(1 - sqrt(1 - fill_ratio))` with `R = sqrt(A_rim/pi)`. Returns None when
+    the inputs cannot describe a fill (non-positive areas, or a food surface at
+    least as large as the rim — which means the food is not sitting *in* a bowl
+    and this model does not apply). The result is clamped to a physically sane
+    range so a near-brim-full reading cannot produce an absurd depth.
+    """
+    if rim_area_cm2 <= 0.0 or food_area_cm2 <= 0.0:
+        return None
+    fill_ratio = food_area_cm2 / rim_area_cm2
+    if fill_ratio >= 1.0:
+        return None
+    radius = math.sqrt(rim_area_cm2 / math.pi)
+    depth = radius * (1.0 - math.sqrt(1.0 - fill_ratio))
+    return float(min(max(depth, MIN_DERIVED_FILL_DEPTH_CM), MAX_DERIVED_FILL_DEPTH_CM))
