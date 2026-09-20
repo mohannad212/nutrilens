@@ -1,0 +1,7 @@
+image,food_class,true_grams,point_g,min_g,max_g,method,reference,ape_pct,covered
+wings_275.jpg,chicken_wings,275.0,325.6,211.6,439.6,shape_only,,18.4,True
+spaghetti_316.jpg,spaghetti_bolognese,316.0,382.1,248.4,515.9,shape_only,,20.9,True
+donuts_203.jpg,donuts,203.0,218.6,170.3,273.8,container_prior,dinner_plate,7.7,True
+soup_bowl_242.jpg,lobster_bisque,242.0,310.1,272.9,347.3,reference_object,fork,28.1,False
+fries_scale_169.jpg,french_fries,169.0,203.0,151.2,265.9,container_prior,dinner_plate,20.1,True
+fries_fork_169.jpg,french_fries,169.0,145.1,127.7,162.5,reference_object,fork,14.1,False

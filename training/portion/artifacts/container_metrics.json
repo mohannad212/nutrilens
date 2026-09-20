@@ -1,0 +1,13 @@
+{
+  "val_acc": 0.874439461883408,
+  "per_class_acc": {
+    "bowl": 0.9,
+    "plate": 0.8516949152542372
+  },
+  "classes": [
+    "bowl",
+    "plate"
+  ],
+  "img_size": 224,
+  "backbone": "mobilenet_v3_small"
+}

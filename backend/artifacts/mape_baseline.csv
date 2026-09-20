@@ -1,0 +1,4 @@
+image,food_class,true_grams,point_g,min_g,max_g,method,reference,ape_pct,covered
+wings_275.jpg,chicken_wings,275.0,299.1,236.3,369.2,container_prior,dinner_plate,8.8,True
+spaghetti_316.jpg,spaghetti_bolognese,316.0,305.0,241.0,376.5,container_prior,dinner_plate,3.5,True
+donuts_203.jpg,donuts,203.0,63.8,50.4,78.8,container_prior,dinner_plate,68.6,False
