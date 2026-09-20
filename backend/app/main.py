@@ -65,6 +65,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import auth as auth_router
@@ -248,6 +249,20 @@ def create_app() -> FastAPI:
         description="AI Food Recognition System — backend API",
         lifespan=lifespan,
     )
+
+    # Dev-only CORS: the Expo *web* target runs the app in an actual browser
+    # (localhost:8081/19006), so without this every fetch to the API is blocked
+    # by the browser's cross-origin check before it even leaves the tab. Expo
+    # Go on a physical device isn't a browser and never needed this — only the
+    # web target does. Wide open, but gated to APP_ENV=development so it never
+    # ships live; production gets no CORSMiddleware at all.
+    if settings.app_env == "development":
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # /health is intentionally un-prefixed — it's the load-balancer probe (03 §8).
     @app.get("/health", tags=["system"])

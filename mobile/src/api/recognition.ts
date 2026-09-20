@@ -1,3 +1,5 @@
+import { Platform } from 'react-native';
+
 import type { RecognitionResponse } from '@/types/api';
 import { api } from './client';
 
@@ -6,9 +8,9 @@ import { api } from './client';
  * `imageUri` is a local file URI from expo-camera/expo-image-picker, already
  * resized/compressed client-side (07-mobile-app.md §5/§6).
  *
- * Deliberately don't set a Content-Type header by hand: React Native's
- * FormData/XHR layer generates the multipart boundary itself, and a
- * hand-set 'multipart/form-data' header without that boundary is a classic
+ * Deliberately don't set a Content-Type header by hand: the FormData/XHR
+ * layer generates the multipart boundary itself, and a hand-set
+ * 'multipart/form-data' header without that boundary is a classic
  * "backend can't parse the upload" bug.
  */
 export async function recogniseRequest(imageUri: string): Promise<RecognitionResponse> {
@@ -18,9 +20,22 @@ export async function recogniseRequest(imageUri: string): Promise<RecognitionRes
   const ext = extMatch ? extMatch[1].toLowerCase() : 'jpg';
   const type = ext === 'png' ? 'image/png' : 'image/jpeg';
 
-  // React Native's fetch/XHR polyfill accepts this {uri, name, type} shape
-  // for a file field - not a real Blob, but this is the documented pattern.
-  formData.append('image', { uri: imageUri, name: filename, type } as unknown as Blob);
+  if (Platform.OS === 'web') {
+    // On web, FormData is the real browser API: it only accepts a string or a
+    // Blob/File for a field value. React Native's {uri, name, type} shape is
+    // meaningless to it and gets silently coerced with String(obj) into the
+    // literal text "[object Object]" - the backend then sees `image` as a
+    // string instead of a file (its "Expected UploadFile, received: str").
+    // imageUri here is a blob:/data: URL (from expo-image-picker /
+    // expo-image-manipulator's web implementations), which fetch() can turn
+    // back into a real Blob to append.
+    const blob = await (await fetch(imageUri)).blob();
+    formData.append('image', blob, filename);
+  } else {
+    // React Native's fetch/XHR polyfill accepts this {uri, name, type} shape
+    // for a file field - not a real Blob, but this is the documented pattern.
+    formData.append('image', { uri: imageUri, name: filename, type } as unknown as Blob);
+  }
 
   // No local try/catch: `client.ts`'s response interceptor already rejects with
   // an `ApiError`. Catching and re-normalising here fed an already-normalised
